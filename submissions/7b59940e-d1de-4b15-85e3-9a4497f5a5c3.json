@@ -1,0 +1,20 @@
+{
+  "id": "7b59940e-d1de-4b15-85e3-9a4497f5a5c3",
+  "url": "https://flashscore.com.ng/",
+  "createdAt": "2026-03-31T15:27:00.757Z",
+  "startedAt": "2026-03-31T15:30:40.058Z",
+  "completedAt": "2026-03-31T15:40:58.083Z",
+  "expiresAt": "2026-04-30T15:27:00.757Z",
+  "status": "failed",
+  "reportToken": "YQcWuRNSNIrj7sl0qjXj-RaN",
+  "publicReportPath": "/r/YQcWuRNSNIrj7sl0qjXj-RaN",
+  "taskPath": "src/tasks/generic_interaction.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": null,
+  "runDir": null,
+  "error": "Request timed out.",
+  "reportSummary": null,
+  "overallScore": null
+}

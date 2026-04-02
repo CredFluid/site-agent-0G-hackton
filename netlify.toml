@@ -1,0 +1,13 @@
+[build]
+  command = "npm run build"
+  publish = "netlify-static"
+
+[build.environment]
+  NODE_VERSION = "20.11.0"
+
+[functions]
+  directory = "dist/netlify/functions"
+  external_node_modules = ["playwright", "@sparticuz/chromium"]
+  included_files = [
+    "dist/tasks/**"
+  ]

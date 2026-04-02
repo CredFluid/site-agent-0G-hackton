@@ -1,0 +1,20 @@
+{
+  "id": "89121f00-14ba-4259-bf5a-11369b1259c6",
+  "url": "https://nairaland.com/",
+  "createdAt": "2026-03-31T05:33:39.998Z",
+  "startedAt": "2026-03-31T05:33:40.002Z",
+  "completedAt": "2026-03-31T05:36:48.044Z",
+  "expiresAt": "2026-04-30T05:33:39.998Z",
+  "status": "completed",
+  "reportToken": "_Mzz0giv96ggIyI1XFB0gjJv",
+  "publicReportPath": "/r/_Mzz0giv96ggIyI1XFB0gjJv",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-31T05-33-40-004Z-nairaland-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-31T05-33-40-004Z-nairaland-com",
+  "error": null,
+  "reportSummary": "Every primary link tested (“Trending,” “Register,” “Politics”) dumps the visitor into a Cloudflare “Just a moment…” loop that never resolves, so navigation effectively fails. There’s no visible fallback or way to proceed, turning CTAs and sections into dead ends. Console/network logs show repeated 401/403 errors and aborted resources, and an accessibility meta-refresh violation further degrades the experience.",
+  "overallScore": 1
+}

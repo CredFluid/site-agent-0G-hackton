@@ -1,0 +1,20 @@
+{
+  "id": "66e9e92c-d3eb-47ee-bae3-0c3bf55fc1e1",
+  "url": "https://www.forebet.com/",
+  "createdAt": "2026-03-31T17:05:42.582Z",
+  "startedAt": "2026-03-31T17:05:42.584Z",
+  "completedAt": "2026-03-31T17:12:10.545Z",
+  "expiresAt": "2026-04-30T17:05:42.582Z",
+  "status": "completed",
+  "reportToken": "bIqUxbKJwicce422Tj7KPs9X",
+  "publicReportPath": "/r/bIqUxbKJwicce422Tj7KPs9X",
+  "taskPath": "src/tasks/generic_interaction.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-31T17-05-42-585Z-forebet-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-31T17-05-42-585Z-forebet-com",
+  "error": null,
+  "reportSummary": "The agent completed 0 of 1 tasks, partially completed 1, and failed 0.   The automated accessibility pass found 9 issues, including 5 higher-impact items. The final report was synthesized directly from recorded evidence because the model-based review step could not finish cleanly within the remaining run budget.",
+  "overallScore": 5
+}

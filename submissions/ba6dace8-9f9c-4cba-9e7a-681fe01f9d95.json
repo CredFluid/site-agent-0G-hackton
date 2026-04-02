@@ -1,0 +1,20 @@
+{
+  "id": "ba6dace8-9f9c-4cba-9e7a-681fe01f9d95",
+  "url": "https://forebet.com/",
+  "createdAt": "2026-04-02T10:27:25.559Z",
+  "startedAt": "2026-04-02T10:27:25.561Z",
+  "completedAt": "2026-04-02T10:30:53.394Z",
+  "expiresAt": "2026-05-02T10:27:25.559Z",
+  "status": "completed",
+  "reportToken": "jjJNVyQb0xwMZ_zy0mC9mCqA",
+  "publicReportPath": "/r/jjJNVyQb0xwMZ_zy0mC9mCqA",
+  "taskPath": "src/tasks/generic_interaction.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-04-02T10-27-25-564Z-forebet-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-04-02T10-27-25-564Z-forebet-com",
+  "error": null,
+  "reportSummary": "Basic navigation works once you get past an intrusive ad overlay. A prominent “LIVE predictions” click did nothing, while multiple “Tomorrow” market tabs loaded with correct titles/URLs but took 2–6 seconds. The experience is cluttered by ad tech (e.g., Google vignette) that blocks interactions. Accessibility is poor with critical missing alt text, low contrast, and missing landmarks.",
+  "overallScore": 4
+}

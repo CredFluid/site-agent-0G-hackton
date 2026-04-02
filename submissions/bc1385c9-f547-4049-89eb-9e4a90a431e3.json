@@ -1,0 +1,20 @@
+{
+  "id": "bc1385c9-f547-4049-89eb-9e4a90a431e3",
+  "url": "https://forebet.com/",
+  "createdAt": "2026-03-31T16:09:13.121Z",
+  "startedAt": "2026-03-31T16:09:13.124Z",
+  "completedAt": "2026-03-31T16:13:21.660Z",
+  "expiresAt": "2026-04-30T16:09:13.121Z",
+  "status": "completed",
+  "reportToken": "ayuMyBmD3H1UYuIZq_jFzvQn",
+  "publicReportPath": "/r/ayuMyBmD3H1UYuIZq_jFzvQn",
+  "taskPath": "src/tasks/generic_interaction.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-31T16-09-13-125Z-forebet-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-31T16-09-13-125Z-forebet-com",
+  "error": null,
+  "reportSummary": "Most Tomorrow prediction tabs load and change state as expected, but the homepage “LIVE predictions” click did nothing and navigation was occasionally intercepted by a google_vignette interstitial. Load times of 1.6–3.4s were typical for tabs. Accessibility is in bad shape (many missing alts, poor contrast, weak landmarks). Logs show heavy ad/analytics activity, which appears to interfere with navigation at least once.",
+  "overallScore": 4
+}

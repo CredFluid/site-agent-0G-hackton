@@ -1,0 +1,20 @@
+{
+  "id": "411f8d7f-c066-4d47-91d8-217f724c19c3",
+  "url": "https://www.forebet.com/",
+  "createdAt": "2026-03-31T16:54:18.647Z",
+  "startedAt": "2026-03-31T16:54:18.649Z",
+  "completedAt": "2026-03-31T17:03:42.381Z",
+  "expiresAt": "2026-04-30T16:54:18.647Z",
+  "status": "completed",
+  "reportToken": "5395TGjHDPTZUepCozqIVA6p",
+  "publicReportPath": "/r/5395TGjHDPTZUepCozqIVA6p",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-31T16-54-18-652Z-forebet-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-31T16-54-18-652Z-forebet-com",
+  "error": null,
+  "reportSummary": "The agent completed 0 of 4 tasks, partially completed 2, and failed 2.  The run also hit its session limit before every visible destination in scope could be validated. The automated accessibility pass did not record any axe violations. The final report was synthesized directly from recorded evidence because the model-based review step could not finish cleanly within the remaining run budget.",
+  "overallScore": 5
+}

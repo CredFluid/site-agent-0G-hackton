@@ -1,0 +1,20 @@
+{
+  "id": "4a6ba1cf-231d-4de3-a1a4-3a0acf5e11a2",
+  "url": "https://nairaland.com/",
+  "createdAt": "2026-03-31T15:12:44.462Z",
+  "startedAt": "2026-03-31T15:12:44.464Z",
+  "completedAt": "2026-03-31T15:17:57.597Z",
+  "expiresAt": "2026-04-30T15:12:44.462Z",
+  "status": "completed",
+  "reportToken": "IHRWhu_Vcdr8gi1IYvgdC6HF",
+  "publicReportPath": "/r/IHRWhu_Vcdr8gi1IYvgdC6HF",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-31T15-12-44-466Z-nairaland-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-31T15-12-44-466Z-nairaland-com",
+  "error": null,
+  "reportSummary": "Every attempted navigation (Trending, Politics) immediately hit a Cloudflare “Just a moment…” interstitial, and no Nairaland content ever became visible. The run is blocked/inconclusive due to anti-bot verification, so primary and secondary navigation could not be validated. Clicks did change URL/title, but repeated waits showed no progress or way to proceed. An accessibility scan flagged a critical meta-refresh issue on the interstitial page.",
+  "overallScore": 1
+}

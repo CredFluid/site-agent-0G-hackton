@@ -1,0 +1,28 @@
+{
+  "id": "4cf6666a-8c08-4bb9-b6c8-27ca4471f85c",
+  "url": "https://nairaland.com/",
+  "email": "tonynoah1@gmail.com",
+  "createdAt": "2026-03-30T18:03:36.674Z",
+  "startedAt": "2026-03-30T18:03:36.678Z",
+  "completedAt": "2026-03-30T18:03:44.129Z",
+  "expiresAt": "2026-04-29T18:03:36.674Z",
+  "status": "failed",
+  "reportToken": "fSGlhEsmihdadnfHl-lxa-lB",
+  "publicReportPath": "/r/fSGlhEsmihdadnfHl-lxa-lB",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": null,
+  "runDir": null,
+  "error": "401 Incorrect API key provided: your_ope************here. You can find your API key at https://platform.openai.com/account/api-keys.",
+  "reportSummary": null,
+  "overallScore": null,
+  "emailDelivery": {
+    "attemptedAt": "2026-03-30T18:03:44.129Z",
+    "delivered": false,
+    "error": "RESEND_API_KEY or EMAIL_FROM is not configured.",
+    "messageId": null,
+    "provider": "disabled"
+  }
+}

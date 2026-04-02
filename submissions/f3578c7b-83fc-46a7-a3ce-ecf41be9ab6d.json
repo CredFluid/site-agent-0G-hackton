@@ -1,0 +1,20 @@
+{
+  "id": "f3578c7b-83fc-46a7-a3ce-ecf41be9ab6d",
+  "url": "https://nairaland.com/",
+  "createdAt": "2026-03-31T06:07:44.364Z",
+  "startedAt": "2026-03-31T06:07:44.367Z",
+  "completedAt": "2026-03-31T06:10:44.399Z",
+  "expiresAt": "2026-04-30T06:07:44.364Z",
+  "status": "completed",
+  "reportToken": "q3nQaoZsllTQtIgoBF-Mt40O",
+  "publicReportPath": "/r/q3nQaoZsllTQtIgoBF-Mt40O",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-31T06-07-44-369Z-nairaland-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-31T06-07-44-369Z-nairaland-com",
+  "error": null,
+  "reportSummary": "The agent completed 0 of 4 tasks, partially completed 3, and failed 1. The automated accessibility pass found 1 issue, including 1 higher-impact item. The final report was synthesized directly from recorded evidence because the model-based review step could not finish cleanly within the remaining run budget.",
+  "overallScore": 5
+}

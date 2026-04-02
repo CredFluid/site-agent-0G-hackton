@@ -1,0 +1,20 @@
+{
+  "id": "372add87-02ad-4752-96fa-8693f9fa37fd",
+  "url": "https://flashscore.com.ng/",
+  "createdAt": "2026-03-31T15:49:23.534Z",
+  "startedAt": "2026-03-31T15:49:23.536Z",
+  "completedAt": "2026-03-31T15:52:16.857Z",
+  "expiresAt": "2026-04-30T15:49:23.534Z",
+  "status": "completed",
+  "reportToken": "L5GkEVGhpS1ab5yyAF3h5Hx4",
+  "publicReportPath": "/r/L5GkEVGhpS1ab5yyAF3h5Hx4",
+  "taskPath": "src/tasks/generic_interaction.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-31T15-49-23-550Z-flashscore-com-ng",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-31T15-49-23-550Z-flashscore-com-ng",
+  "error": null,
+  "reportSummary": "The site did not load at all in this run, blocking any real UX evaluation. The browser ended on a blank chrome-error page after repeated timeouts. No content, navigation, or CTAs were visible to test. Accessibility checks on the error document showed missing title, lang, main landmark, and h1.",
+  "overallScore": 1
+}

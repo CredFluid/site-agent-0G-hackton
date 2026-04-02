@@ -1,0 +1,20 @@
+{
+  "id": "f4e78939-f22f-44e6-be2c-a83412cbc026",
+  "url": "https://flashscore.com.ng/",
+  "createdAt": "2026-03-31T15:13:47.143Z",
+  "startedAt": "2026-03-31T15:26:26.692Z",
+  "completedAt": "2026-03-31T15:30:40.055Z",
+  "expiresAt": "2026-04-30T15:13:47.143Z",
+  "status": "failed",
+  "reportToken": "NQm12OU96rObAu2vrbhrce2f",
+  "publicReportPath": "/r/NQm12OU96rObAu2vrbhrce2f",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": null,
+  "runDir": null,
+  "error": "Request timed out.",
+  "reportSummary": null,
+  "overallScore": null
+}

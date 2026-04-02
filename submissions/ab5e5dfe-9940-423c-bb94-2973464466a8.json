@@ -1,0 +1,20 @@
+{
+  "id": "ab5e5dfe-9940-423c-bb94-2973464466a8",
+  "url": "https://flashscores.com.ng/",
+  "createdAt": "2026-03-31T05:37:35.651Z",
+  "startedAt": "2026-03-31T05:37:35.653Z",
+  "completedAt": "2026-03-31T05:39:56.830Z",
+  "expiresAt": "2026-04-30T05:37:35.651Z",
+  "status": "completed",
+  "reportToken": "IvLcuTBc2hEaELm-3GSUmFlJ",
+  "publicReportPath": "/r/IvLcuTBc2hEaELm-3GSUmFlJ",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-31T05-37-35-654Z-flashscores-com-ng",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-31T05-37-35-654Z-flashscores-com-ng",
+  "error": null,
+  "reportSummary": "The site never loaded; DNS resolution failed (net::ERR_NAME_NOT_RESOLVED), yielding only a Chrome error page or about:blank. With no visible content, nothing was clickable, so header links, CTAs, and secondary navigation could not be tested. No user-facing error page offered recovery actions. Accessibility checks also failed (missing title, lang, main landmark, and H1).",
+  "overallScore": 1
+}

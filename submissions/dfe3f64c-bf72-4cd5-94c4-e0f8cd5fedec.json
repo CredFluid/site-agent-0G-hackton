@@ -1,0 +1,20 @@
+{
+  "id": "dfe3f64c-bf72-4cd5-94c4-e0f8cd5fedec",
+  "url": "https://nairaland.com/",
+  "createdAt": "2026-03-30T19:29:33.380Z",
+  "startedAt": "2026-03-30T19:29:33.388Z",
+  "completedAt": "2026-03-30T19:33:44.623Z",
+  "expiresAt": "2026-04-29T19:29:33.380Z",
+  "status": "completed",
+  "reportToken": "RRFj6LM5ovXTqhUAzq41_LUz",
+  "publicReportPath": "/r/RRFj6LM5ovXTqhUAzq41_LUz",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-30T19-29-33-391Z-nairaland-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-30T19-29-33-391Z-nairaland-com",
+  "error": null,
+  "reportSummary": "Every tested navigation (Trending, Register, Politics) stalled behind a perpetual Cloudflare 'Just a moment…' screen. URLs updated but no Nairaland content ever appeared, leaving only irrelevant Cloudflare/Privacy links clickable. The result is extreme friction and unreliable navigation with zero visible progress. A critical meta-refresh accessibility violation is also present.",
+  "overallScore": 1
+}

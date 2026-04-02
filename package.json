@@ -1,0 +1,41 @@
+{
+  "name": "site-agent-prod",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Production-ready AI website review agent using Playwright, OpenAI, and axe-core.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/cli/run.js",
+    "dev": "tsx src/cli/run.ts",
+    "dashboard": "tsx src/dashboard/server.ts",
+    "dashboard:start": "node dist/dashboard/server.js",
+    "format": "prettier --write .",
+    "lint": "eslint .",
+    "browser:install": "playwright install chromium"
+  },
+  "dependencies": {
+    "@axe-core/playwright": "^4.11.1",
+    "@netlify/blobs": "^10.7.4",
+    "@netlify/functions": "^5.1.5",
+    "@sparticuz/chromium": "^143.0.4",
+    "commander": "^14.0.3",
+    "dotenv": "^17.2.1",
+    "openai": "^6.27.0",
+    "playwright": "^1.58.2",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.3.0",
+    "eslint": "^9.34.0",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.57.2"
+  },
+  "engines": {
+    "node": ">=20.11.0"
+  }
+}

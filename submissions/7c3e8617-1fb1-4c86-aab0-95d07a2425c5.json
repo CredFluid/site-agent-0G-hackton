@@ -1,0 +1,20 @@
+{
+  "id": "7c3e8617-1fb1-4c86-aab0-95d07a2425c5",
+  "url": "https://forebet.com/",
+  "createdAt": "2026-03-31T04:39:34.938Z",
+  "startedAt": "2026-03-31T04:39:34.939Z",
+  "completedAt": "2026-03-31T04:50:42.943Z",
+  "expiresAt": "2026-04-30T04:39:34.938Z",
+  "status": "completed",
+  "reportToken": "ah1hrwuabDrFs_zOJxktsaFH",
+  "publicReportPath": "/r/ah1hrwuabDrFs_zOJxktsaFH",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-31T04-39-34-941Z-forebet-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-31T04-39-34-941Z-forebet-com",
+  "error": null,
+  "reportSummary": "Navigation mostly works and labels are clear, but the site intermittently hijacks clicks with an interstitial and once routed a “Basketball” click to a Football page. The homepage/logo link wasn’t clearly targetable. Severe accessibility failures (missing image alts, poor contrast, missing landmarks) further undermine basic usability.",
+  "overallScore": 5
+}

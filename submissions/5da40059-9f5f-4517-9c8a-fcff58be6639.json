@@ -1,0 +1,20 @@
+{
+  "id": "5da40059-9f5f-4517-9c8a-fcff58be6639",
+  "url": "https://flashscore.com.ng/",
+  "createdAt": "2026-03-30T18:47:50.919Z",
+  "startedAt": "2026-03-30T18:47:50.924Z",
+  "completedAt": "2026-03-30T18:59:24.011Z",
+  "expiresAt": "2026-04-29T18:47:50.919Z",
+  "status": "completed",
+  "reportToken": "Qu06_w75o0xyyZTtSVEiuGdR",
+  "publicReportPath": "/r/Qu06_w75o0xyyZTtSVEiuGdR",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-03-30T18-47-50-928Z-flashscore-com-ng",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-03-30T18-47-50-928Z-flashscore-com-ng",
+  "error": null,
+  "reportSummary": "Sports and league navigation generally responds correctly with clear URL/title changes. However, opening a specific match detail from the scores list was not discoverable, and the Favorites control behaves like a button with unclear feedback. The console is flooded with failed third‑party requests and WebSocket errors, hinting at unstable live updates and potential performance drag. Accessibility basics are not met (missing names on interactive elements, contrast issues, and landmark problems).",
+  "overallScore": 5
+}

@@ -1,0 +1,20 @@
+{
+  "id": "5638f2c3-daa6-4232-970d-d496891b4211",
+  "url": "https://forebet.com/",
+  "createdAt": "2026-04-02T10:31:59.479Z",
+  "startedAt": "2026-04-02T10:31:59.481Z",
+  "completedAt": "2026-04-02T10:41:56.452Z",
+  "expiresAt": "2026-05-02T10:31:59.479Z",
+  "status": "completed",
+  "reportToken": "uv14cTz9Xf7looyqMTX7RxWz",
+  "publicReportPath": "/r/uv14cTz9Xf7looyqMTX7RxWz",
+  "taskPath": "src/tasks/first_time_buyer.json",
+  "headed": false,
+  "mobile": false,
+  "ignoreHttpsErrors": false,
+  "runId": "2026-04-02T10-31-59-482Z-forebet-com",
+  "runDir": "/Users/Noah/Downloads/site-agent-prod/runs/2026-04-02T10-31-59-482Z-forebet-com",
+  "error": null,
+  "reportSummary": "Core navigation works and labels match destinations, but the experience is marred by an ad interstitial that hijacked a click and multiple slow tab loads. Most prominent CTAs (Today, Tomorrow, Live, Top) routed correctly, yet feedback was inconsistent and occasionally sluggish. Accessibility basics are in poor shape with many missing image alts and weak contrast. Overall usable, but the ad vignette and load latency create avoidable friction and trust dents.",
+  "overallScore": 5
+}
