@@ -1,6 +1,4 @@
-import path from "node:path";
-import { config } from "../config.js";
-import { runAuditJob } from "../core/runAuditJob.js";
+import { processSubmissionBatch } from "../core/processSubmissionBatch.js";
 import { createSubmissionRecord, listSubmissions, readSubmission, writeSubmission } from "./store.js";
 import type { Submission } from "./types.js";
 
@@ -8,20 +6,21 @@ export class SubmissionService {
   private activeSubmissionId: string | null = null;
   private readonly queue: string[] = [];
 
-  createSubmission(args: {
+  async createSubmission(args: {
     url: string;
     taskPath?: string;
     headed?: boolean;
     mobile?: boolean;
     ignoreHttpsErrors?: boolean;
-  }): Submission {
+    agentCount?: number;
+  }): Promise<Submission> {
     const submission = createSubmissionRecord(args);
     writeSubmission(submission);
     this.enqueue(submission.id);
     return submission;
   }
 
-  getSubmission(id: string): Submission | null {
+  async getSubmission(id: string): Promise<Submission | null> {
     return readSubmission(id);
   }
 
@@ -77,54 +76,18 @@ export class SubmissionService {
       return;
     }
 
-    const startedAt = new Date().toISOString();
-    writeSubmission({
-      ...submission,
-      status: "running",
-      startedAt,
-      completedAt: null,
-      error: null
+    await processSubmissionBatch({
+      submission: {
+        ...submission,
+        startedAt: new Date().toISOString()
+      },
+      writeSubmission: async (nextSubmission) => {
+        writeSubmission(nextSubmission);
+      },
+      uploadRunArtifacts: async () => {
+        return;
+      },
+      source: "submission_form"
     });
-
-    try {
-      const result = await runAuditJob({
-        baseUrl: submission.url,
-        taskPath: submission.taskPath,
-        headed: submission.headed,
-        mobile: submission.mobile,
-        ignoreHttpsErrors: submission.ignoreHttpsErrors,
-        maxSessionDurationMs: config.maxSessionDurationMs,
-        extraInputs: {
-          source: "submission_form",
-          submissionId: submission.id,
-          reportToken: submission.reportToken,
-          expiresAt: submission.expiresAt
-        }
-      });
-
-      const runId = path.basename(result.runDir);
-
-      writeSubmission({
-        ...submission,
-        status: "completed",
-        startedAt,
-        completedAt: new Date().toISOString(),
-        runId,
-        runDir: result.runDir,
-        error: null,
-        reportSummary: result.report.summary,
-        overallScore: result.report.overall_score
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown submission failure";
-
-      writeSubmission({
-        ...submission,
-        status: "failed",
-        startedAt,
-        completedAt: new Date().toISOString(),
-        error: message
-      });
-    }
   }
 }

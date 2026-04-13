@@ -265,6 +265,7 @@ const DASHBOARD_CSS = String.raw`
 
   .pill--score-high,
   .pill--status-success,
+  .pill--status-completed,
   .pill--friction-none {
     color: #0f5f56;
     background: rgba(23, 111, 105, 0.12);
@@ -272,6 +273,8 @@ const DASHBOARD_CSS = String.raw`
 
   .pill--score-mid,
   .pill--status-partial_success,
+  .pill--status-queued,
+  .pill--status-running,
   .pill--friction-low,
   .pill--friction-medium {
     color: #8a5f08;
@@ -649,8 +652,18 @@ function buildRunSummary(runId: string): DashboardRunSummary {
     overallScore: report?.overall_score ?? null,
     summary: report?.summary ?? null,
     taskCount: report?.task_results.length ?? 0,
-    accessibilityViolationCount: accessibility?.violations.length ?? null
+    accessibilityViolationCount: accessibility?.violations.length ?? null,
+    batchRole: inputs?.batchRole ?? "single",
+    agentCount: inputs?.agentCount ?? 1,
+    completedAgentCount: inputs?.completedAgentCount ?? 0,
+    failedAgentCount: inputs?.failedAgentCount ?? 0,
+    agentLabel: inputs?.agentLabel ?? null,
+    agentProfileLabel: inputs?.agentProfileLabel ?? null
   });
+}
+
+function isVisibleDashboardRun(run: DashboardRunSummary): boolean {
+  return run.batchRole !== "child";
 }
 
 function buildRunDetail(runId: string): DashboardRunDetail | null {
@@ -802,6 +815,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, submissi
     const form = new URLSearchParams(body);
     const urlInput = form.get("url") ?? "";
     const requestedMode = form.get("mode") === "structured" ? "structured" : "generic";
+    const requestedAgentCount = Number(form.get("agents") ?? "1");
+    const normalizedAgentCount = Number.isFinite(requestedAgentCount)
+      ? Math.min(5, Math.max(1, Math.round(requestedAgentCount)))
+      : 1;
     const taskPath = requestedMode === "structured" ? "src/tasks/first_time_buyer.json" : "src/tasks/generic_interaction.json";
 
     const urlValidation = validatePublicUrl(urlInput);
@@ -813,16 +830,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, submissi
         renderLandingPage({
           error: urlValidation.reason ?? "Enter a valid public URL.",
           submittedUrl: urlInput,
-          selectedMode: requestedMode
+          selectedMode: requestedMode,
+          selectedAgentCount: normalizedAgentCount
         }),
         "text/html"
       );
       return;
     }
 
-    const submission = submissionService.createSubmission({
+    const submission = await submissionService.createSubmission({
       url: urlValidation.normalizedUrl ?? urlInput.trim(),
-      taskPath
+      taskPath,
+      agentCount: normalizedAgentCount
     });
 
     sendRedirect(res, `/submissions/${encodeURIComponent(submission.id)}`);
@@ -835,7 +854,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, submissi
   }
 
   if (requestUrl.pathname === "/") {
-    sendText(res, 200, renderLandingPage({}), "text/html");
+      sendText(res, 200, renderLandingPage({}), "text/html");
     return;
   }
 
@@ -850,7 +869,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, submissi
   }
 
   if (pathParts[0] === "submissions" && pathParts[1] && pathParts.length === 2) {
-    const submission = submissionService.getSubmission(decodeURIComponent(pathParts[1]));
+    const submission = await submissionService.getSubmission(decodeURIComponent(pathParts[1]));
     if (!submission) {
       sendText(res, 404, renderReportUnavailablePage({ title: "Submission not found", message: "We could not find that submission." }), "text/html");
       return;
@@ -901,7 +920,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, submissi
   }
 
   if (requestUrl.pathname === "/api/runs") {
-    const runs = listRunIds().map(buildRunSummary);
+    const runs = listRunIds().map(buildRunSummary).filter(isVisibleDashboardRun);
     sendJson(res, runs);
     return;
   }

@@ -77,10 +77,11 @@ Then open:
 
 The local app now supports the minimal AgentProbe-style loop:
 - a public submission form at `/`
-- one queued AI session at a time
+- one queued submission batch at a time
+- 1 to 5 concurrent agent perspectives per submission
 - a hosted public report link at `/r/<token>`
 - a status page at `/submissions/<submission-id>`
-- dashboard-first report review and downloads
+- dashboard-first aggregate and per-agent report review and downloads
 
 ## Netlify deployment
 
@@ -125,8 +126,9 @@ npm run dashboard
 ```
 
 The dashboard:
-- lists saved runs from `runs/`
+- lists saved single runs and aggregate multi-agent runs from `runs/`
 - shows overall scores and report summaries
+- surfaces the per-agent breakdown for aggregate runs
 - displays strengths, weaknesses, and top fixes
 - lets you inspect task evidence and per-step interaction logs
 - surfaces saved accessibility findings
@@ -135,10 +137,11 @@ The dashboard:
 The public app:
 - accepts a URL submission at `/`
 - defaults to a generic walkthrough run mode, with a structured checklist option
+- lets you choose between 1 and 5 concurrent agent perspectives
 - validates public URLs only in V1
 - serves unique public report links for 30 days at `/r/<token>`
 - shows submission progress at `/submissions/<submission-id>`
-- lets you download saved reports directly from the dashboard
+- lets you download both aggregate and per-agent reports directly from the dashboard
 
 ## Output files
 

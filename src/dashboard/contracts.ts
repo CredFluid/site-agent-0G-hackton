@@ -4,6 +4,7 @@ import {
   FinalReportSchema,
   TaskHistoryEntrySchema
 } from "../schemas/types.js";
+import { SubmissionAgentRunSchema } from "../submissions/types.js";
 
 const TenPointNullableScoreSchema = z
   .number()
@@ -33,7 +34,18 @@ export const RunInputsSchema = z.object({
   maxRunDurationClamped: z.boolean().optional(),
   deviceTimezone: z.string().optional(),
   browserTimezone: z.string().optional(),
-  synchronizedTimezone: z.string().optional()
+  synchronizedTimezone: z.string().optional(),
+  batchRole: z.enum(["single", "child", "aggregate"]).default("single"),
+  parentSubmissionId: z.string().optional(),
+  agentCount: z.number().int().min(1).max(5).default(1),
+  completedAgentCount: z.number().int().nonnegative().default(0),
+  failedAgentCount: z.number().int().nonnegative().default(0),
+  agentIndex: z.number().int().min(1).max(5).optional(),
+  agentLabel: z.string().optional(),
+  agentProfileLabel: z.string().optional(),
+  personaVariantKey: z.string().optional(),
+  aggregatedFromRunIds: z.array(z.string()).default([]),
+  agentRuns: z.array(SubmissionAgentRunSchema).max(5).default([])
 });
 
 export const DashboardRunSummarySchema = z.object({
@@ -49,7 +61,13 @@ export const DashboardRunSummarySchema = z.object({
   overallScore: TenPointNullableScoreSchema,
   summary: z.string().nullable(),
   taskCount: z.number().int().nonnegative(),
-  accessibilityViolationCount: z.number().int().nonnegative().nullable()
+  accessibilityViolationCount: z.number().int().nonnegative().nullable(),
+  batchRole: z.enum(["single", "child", "aggregate"]).default("single"),
+  agentCount: z.number().int().min(1).max(5).default(1),
+  completedAgentCount: z.number().int().nonnegative().default(0),
+  failedAgentCount: z.number().int().nonnegative().default(0),
+  agentLabel: z.string().nullable().default(null),
+  agentProfileLabel: z.string().nullable().default(null)
 });
 
 export const DashboardTaskHistoryEntrySchema = TaskHistoryEntrySchema.extend({

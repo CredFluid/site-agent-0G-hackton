@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { config } from "../config.js";
-import { SubmissionSchema, type Submission } from "./types.js";
+import { type Submission, SubmissionSchema, type SubmissionAgentRun } from "./types.js";
+import { buildInitialAgentRuns } from "../core/agentProfiles.js";
 
 export function computeExpiresAt(createdAt: string): string {
   const createdMs = new Date(createdAt).getTime();
@@ -17,10 +18,15 @@ export function createSubmissionRecord(args: {
   headed?: boolean;
   mobile?: boolean;
   ignoreHttpsErrors?: boolean;
+  agentCount?: number;
+  agentRuns?: SubmissionAgentRun[];
 }): Submission {
   const createdAt = new Date().toISOString();
   const id = crypto.randomUUID();
   const reportToken = crypto.randomBytes(18).toString("base64url");
+  const taskPath = args.taskPath ?? "src/tasks/generic_interaction.json";
+  const agentCount = Math.min(5, Math.max(1, Math.round(args.agentCount ?? args.agentRuns?.length ?? 1)));
+  const agentRuns = args.agentRuns ?? buildInitialAgentRuns(taskPath, agentCount);
 
   return SubmissionSchema.parse({
     id,
@@ -32,10 +38,14 @@ export function createSubmissionRecord(args: {
     status: "queued",
     reportToken,
     publicReportPath: `/r/${reportToken}`,
-    taskPath: args.taskPath ?? "src/tasks/generic_interaction.json",
+    taskPath,
     headed: Boolean(args.headed),
     mobile: Boolean(args.mobile),
     ignoreHttpsErrors: Boolean(args.ignoreHttpsErrors),
+    agentCount,
+    completedAgentCount: 0,
+    failedAgentCount: 0,
+    agentRuns,
     runId: null,
     runDir: null,
     error: null,

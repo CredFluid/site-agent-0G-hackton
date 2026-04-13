@@ -1,7 +1,5 @@
-import path from "node:path";
-import { runAuditJob } from "../../core/runAuditJob.js";
-import { config } from "../../config.js";
 import { readSubmission, uploadRunArtifacts, writeSubmission } from "../storage.js";
+import { processSubmissionBatch } from "../../core/processSubmissionBatch.js";
 
 export default async (req: Request): Promise<void> => {
   if (req.method !== "POST") {
@@ -40,53 +38,13 @@ export default async (req: Request): Promise<void> => {
   }
 
   const startedAt = new Date().toISOString();
-  await writeSubmission({
-    ...submission,
-    status: "running",
-    startedAt,
-    completedAt: null,
-    error: null
+  await processSubmissionBatch({
+    submission: {
+      ...submission,
+      startedAt
+    },
+    writeSubmission,
+    uploadRunArtifacts,
+    source: "netlify_submission_form"
   });
-
-  try {
-    const result = await runAuditJob({
-      baseUrl: submission.url,
-      taskPath: submission.taskPath,
-      headed: submission.headed,
-      mobile: submission.mobile,
-      ignoreHttpsErrors: submission.ignoreHttpsErrors,
-      maxSessionDurationMs: config.maxSessionDurationMs,
-      extraInputs: {
-        source: "netlify_submission_form",
-        submissionId: submission.id,
-        reportToken: submission.reportToken,
-        expiresAt: submission.expiresAt
-      }
-    });
-
-    const runId = path.basename(result.runDir);
-    await uploadRunArtifacts(runId, result.runDir);
-
-    await writeSubmission({
-      ...submission,
-      status: "completed",
-      startedAt,
-      completedAt: new Date().toISOString(),
-      runId,
-      runDir: null,
-      error: null,
-      reportSummary: result.report.summary,
-      overallScore: result.report.overall_score
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown submission failure";
-
-    await writeSubmission({
-      ...submission,
-      status: "failed",
-      startedAt,
-      completedAt: new Date().toISOString(),
-      error: message
-    });
-  }
 };

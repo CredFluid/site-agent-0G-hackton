@@ -195,8 +195,10 @@ export function renderLandingPage(args: {
   error?: string | null;
   submittedUrl?: string;
   selectedMode?: "generic" | "structured";
+  selectedAgentCount?: number;
 }): string {
   const selectedMode = args.selectedMode ?? "generic";
+  const selectedAgentCount = Math.min(5, Math.max(1, Math.round(args.selectedAgentCount ?? 1)));
 
   return basePage({
     title: "AgentProbe",
@@ -205,11 +207,11 @@ export function renderLandingPage(args: {
         <section class="card">
           <p class="eyebrow">AgentProbe V1</p>
           <h1>Synthetic user testing for public web apps</h1>
-          <p>Submit a public URL. A single AI agent visits the site like a first-time user, explores it for up to 10 minutes, and saves a report you can review and download from the dashboard.</p>
+          <p>Submit a public URL. Launch between 1 and 5 concurrent AI agents, each behaving like a different type of visitor, then review the combined report and each individual agent run.</p>
           <div class="meta">
-            <span>One agent</span>
-            <span>One session</span>
-            <span>One report</span>
+            <span>1-5 agents</span>
+            <span>Concurrent runs</span>
+            <span>Aggregate + per-agent reports</span>
             <span>Public URLs only</span>
             <span>Dashboard downloads</span>
           </div>
@@ -224,6 +226,14 @@ export function renderLandingPage(args: {
               <select name="mode">
                 <option value="generic" ${selectedMode === "generic" ? "selected" : ""}>Generic walkthrough</option>
                 <option value="structured" ${selectedMode === "structured" ? "selected" : ""}>Structured navigation checklist</option>
+              </select>
+            </label>
+            <label>
+              Agent count
+              <select name="agents">
+                ${[1, 2, 3, 4, 5]
+                  .map((count) => `<option value="${count}" ${selectedAgentCount === count ? "selected" : ""}>${count} agent${count === 1 ? "" : "s"}</option>`)
+                  .join("")}
               </select>
             </label>
             <button type="submit">Run test</button>
@@ -244,6 +254,7 @@ export function renderSubmissionStatusPage(args: { appBaseUrl: string; submissio
   const htmlDownloadUrl = submission.runId ? `/api/runs/${encodeURIComponent(submission.runId)}/artifacts/report.html` : null;
   const jsonDownloadUrl = submission.runId ? `/api/runs/${encodeURIComponent(submission.runId)}/artifacts/report.json` : null;
   const shouldRefresh = submission.status === "queued" || submission.status === "running";
+  const finishedAgentCount = submission.completedAgentCount + submission.failedAgentCount;
 
   return basePage({
     title: "AgentProbe submission",
@@ -256,9 +267,46 @@ export function renderSubmissionStatusPage(args: { appBaseUrl: string; submissio
           <div class="meta">
             <span class="status status--${escapeHtml(submission.status)}">${escapeHtml(submission.status)}</span>
             <span>${escapeHtml(submission.url)}</span>
+            <span>${escapeHtml(`${submission.agentCount} agent${submission.agentCount === 1 ? "" : "s"}`)}</span>
+            <span>${escapeHtml(`${submission.completedAgentCount} completed`)}</span>
+            <span>${escapeHtml(`${submission.failedAgentCount} failed`)}</span>
+            <span>${escapeHtml(`${finishedAgentCount}/${submission.agentCount} finished`)}</span>
             <span>Expires ${escapeHtml(formatDateTime(submission.expiresAt))}</span>
             <span>${escapeHtml(config.deviceTimezone)}</span>
           </div>
+          ${
+            submission.agentRuns.length > 0
+              ? `
+                <div class="card" style="margin-top: 1rem; padding: 1rem;">
+                  <h2>Agent panel</h2>
+                  <div class="meta">
+                    ${submission.agentRuns
+                      .map(
+                        (agentRun) => `
+                          <span class="status status--${escapeHtml(agentRun.status)}">${escapeHtml(agentRun.label)}: ${escapeHtml(agentRun.profileLabel)} (${escapeHtml(agentRun.status)})</span>
+                        `
+                      )
+                      .join("")}
+                  </div>
+                  <div class="link-row">
+                    ${submission.agentRuns
+                      .map((agentRun) => {
+                        if (!agentRun.runId) {
+                          return "";
+                        }
+
+                        return `
+                          <a class="ghost-link" href="/reports/${escapeHtml(agentRun.runId)}">${escapeHtml(`${agentRun.label} report`)}</a>
+                          <a class="ghost-link" href="/api/runs/${escapeHtml(agentRun.runId)}/artifacts/report.html">${escapeHtml(`${agentRun.label} HTML`)}</a>
+                          <a class="ghost-link" href="/api/runs/${escapeHtml(agentRun.runId)}/artifacts/report.json">${escapeHtml(`${agentRun.label} JSON`)}</a>
+                        `;
+                      })
+                      .join("")}
+                  </div>
+                </div>
+              `
+              : ""
+          }
           ${
             submission.status === "completed"
               ? `

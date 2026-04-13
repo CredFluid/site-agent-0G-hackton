@@ -72,6 +72,10 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
     const form = new URLSearchParams(await req.text());
     const urlInput = form.get("url") ?? "";
     const requestedMode = form.get("mode") === "structured" ? "structured" : "generic";
+    const requestedAgentCount = Number(form.get("agents") ?? "1");
+    const normalizedAgentCount = Number.isFinite(requestedAgentCount)
+      ? Math.min(5, Math.max(1, Math.round(requestedAgentCount)))
+      : 1;
     const taskPath = requestedMode === "structured" ? "src/tasks/first_time_buyer.json" : "src/tasks/generic_interaction.json";
     const urlValidation = validatePublicUrl(urlInput);
 
@@ -80,7 +84,8 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
         renderLandingPage({
           error: urlValidation.reason ?? "Enter a valid public URL.",
           submittedUrl: urlInput,
-          selectedMode: requestedMode
+          selectedMode: requestedMode,
+          selectedAgentCount: normalizedAgentCount
         }),
         { status: 400, contentType: "text/html" }
       );
@@ -88,7 +93,8 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
 
     const submission = createSubmissionRecord({
       url: urlValidation.normalizedUrl ?? urlInput.trim(),
-      taskPath
+      taskPath,
+      agentCount: normalizedAgentCount
     });
 
     await writeSubmission(submission);
@@ -201,7 +207,8 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
   }
 
   if (requestUrl.pathname === "/api/runs") {
-    const summaries = await Promise.all((await listRunIds()).map((runId) => buildRunSummary(runId)));
+    const summaries = (await Promise.all((await listRunIds()).map((runId) => buildRunSummary(runId))))
+      .filter((run) => run.batchRole !== "child");
     return respondJson(summaries);
   }
 

@@ -1,3 +1,4 @@
+import type { TaskSuite } from "../schemas/types.js";
 import path from "node:path";
 import { clampRunDurationMs, config, deriveBrowserExecutionBudgetMs, deriveReportingReserveMs } from "../config.js";
 import { evaluateRun } from "./evaluator.js";
@@ -10,6 +11,7 @@ import { resolveRunDir, writeJson, writeText } from "../utils/files.js";
 export async function runAuditJob(options: {
   baseUrl: string;
   taskPath?: string;
+  suiteOverride?: TaskSuite;
   headed?: boolean;
   mobile?: boolean;
   ignoreHttpsErrors?: boolean;
@@ -23,7 +25,7 @@ export async function runAuditJob(options: {
   taskPath: string;
 }> {
   const taskPath = options.taskPath ?? "src/tasks/first_time_buyer.json";
-  const suite = loadTaskSuite(taskPath);
+  const suite = options.suiteOverride ?? loadTaskSuite(taskPath);
   const runDir = resolveRunDir(options.baseUrl);
   const inputsPath = path.join(runDir, "inputs.json");
   const startedAt = new Date().toISOString();

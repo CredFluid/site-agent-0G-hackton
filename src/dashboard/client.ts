@@ -68,6 +68,22 @@ function scoreTone(score: number | null | undefined): "high" | "mid" | "low" {
   return "low";
 }
 
+function formatAgentCount(agentCount: number): string {
+  return `${agentCount} agent${agentCount === 1 ? "" : "s"}`;
+}
+
+function describeBatchRole(batchRole: DashboardRunSummary["batchRole"], agentCount: number): string {
+  if (batchRole === "aggregate") {
+    return `${formatAgentCount(agentCount)} review panel`;
+  }
+
+  if (batchRole === "child") {
+    return "Individual agent perspective";
+  }
+
+  return "Single-agent run";
+}
+
 function safeHref(url: string): string | null {
   return /^https?:\/\//i.test(url) ? url : null;
 }
@@ -107,7 +123,7 @@ async function loadRuns(): Promise<void> {
   try {
     state.runs = await fetchJson<DashboardRunSummary[]>("/api/runs");
     const requestedRunId = currentRunIdFromUrl();
-    const selectedRun =
+    const fallbackRun =
       state.runs.find((run) => run.id === requestedRunId) ??
       state.runs[0] ??
       null;
@@ -115,8 +131,19 @@ async function loadRuns(): Promise<void> {
     state.loadingRuns = false;
     render();
 
-    if (selectedRun) {
-      await loadRunDetail(selectedRun.id, false);
+    if (requestedRunId) {
+      const loadedRequested = await loadRunDetail(requestedRunId, false);
+      if (!loadedRequested && fallbackRun && fallbackRun.id !== requestedRunId) {
+        const missingRunMessage = `Run '${requestedRunId}' was not found. Showing the latest visible run instead.`;
+        await loadRunDetail(fallbackRun.id, false);
+        state.error = missingRunMessage;
+        render();
+      }
+      return;
+    }
+
+    if (fallbackRun) {
+      await loadRunDetail(fallbackRun.id, false);
       return;
     }
 
@@ -128,7 +155,7 @@ async function loadRuns(): Promise<void> {
   }
 }
 
-async function loadRunDetail(runId: string, pushHistory: boolean): Promise<void> {
+async function loadRunDetail(runId: string, pushHistory: boolean): Promise<boolean> {
   state.selectedRunId = runId;
   state.loadingDetail = true;
   state.error = null;
@@ -138,12 +165,15 @@ async function loadRunDetail(runId: string, pushHistory: boolean): Promise<void>
     state.detail = await fetchJson<DashboardRunDetail>(`/api/runs/${encodeURIComponent(runId)}`);
     state.loadingDetail = false;
     updateUrl(runId, pushHistory);
+    render();
+    return true;
   } catch (error) {
+    state.detail = null;
     state.loadingDetail = false;
     state.error = error instanceof Error ? error.message : "Failed to load the selected run.";
+    render();
+    return false;
   }
-
-  render();
 }
 
 function renderRunList(): string {
@@ -160,7 +190,14 @@ function renderRunList(): string {
       const isActive = run.id === state.selectedRunId;
       const summary = run.summary ?? "No report summary has been generated for this run yet.";
       const scoreLabel = run.overallScore === null ? "n/a" : `${run.overallScore}`;
-      const modes = [run.mobile ? "Mobile" : "Desktop", run.headed ? "Headed" : "Headless"];
+      const modes = [
+        describeBatchRole(run.batchRole, run.agentCount),
+        run.mobile ? "Mobile" : "Desktop",
+        run.headed ? "Headed" : "Headless",
+        run.batchRole === "aggregate"
+          ? `${run.completedAgentCount}/${run.agentCount} completed${run.failedAgentCount > 0 ? `, ${run.failedAgentCount} failed` : ""}`
+          : null
+      ];
 
       return `
         <button type="button" class="run-button ${isActive ? "run-button--active" : ""}" data-run-id="${escapeHtml(run.id)}">
@@ -173,7 +210,7 @@ function renderRunList(): string {
           </div>
           <p class="run-summary">${escapeHtml(summary)}</p>
           <div class="mini-meta">
-            ${modes.map((mode) => `<span>${escapeHtml(mode)}</span>`).join("")}
+            ${modes.filter((mode): mode is string => Boolean(mode)).map((mode) => `<span>${escapeHtml(mode)}</span>`).join("")}
             <span>${escapeHtml(`${run.taskCount} tasks`)}</span>
           </div>
         </button>
@@ -230,6 +267,68 @@ function renderList(title: string, items: string[], emptyCopy: string): string {
         ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
       </ul>
     </div>
+  `;
+}
+
+function renderAgentPerspectivePanel(detail: DashboardRunDetail): string {
+  const inputs = detail.inputs;
+  if (!inputs || inputs.batchRole !== "aggregate" || inputs.agentRuns.length === 0) {
+    return "";
+  }
+
+  const completedCount = inputs.agentRuns.filter((agentRun) => agentRun.status === "completed").length;
+  const failedCount = inputs.agentRuns.filter((agentRun) => agentRun.status === "failed").length;
+
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <h3>Agent perspectives</h3>
+        <span class="muted">${escapeHtml(`${completedCount}/${inputs.agentCount} completed${failedCount > 0 ? `, ${failedCount} failed` : ""}`)}</span>
+      </div>
+      <div class="list-grid">
+        ${inputs.agentRuns
+          .slice()
+          .sort((left, right) => left.index - right.index)
+          .map((agentRun) => {
+            const summary = agentRun.reportSummary ?? agentRun.error ?? "This agent has not produced a final report yet.";
+            const score = agentRun.overallScore === null ? "n/a" : `${agentRun.overallScore}/10`;
+            const meta = [
+              agentRun.profileLabel,
+              agentRun.personaName,
+              `Score: ${score}`,
+              agentRun.completedAt ? `Finished ${formatDate(agentRun.completedAt, inputs.synchronizedTimezone ?? null)}` : null
+            ].filter((item): item is string => Boolean(item));
+
+            return `
+              <article class="task-card">
+                <div class="task-card__header">
+                  <div>
+                    <h3>${escapeHtml(agentRun.label)}</h3>
+                    <p class="task-card__reason">${escapeHtml(summary)}</p>
+                  </div>
+                  <span class="pill pill--status-${escapeHtml(agentRun.status)}">${escapeHtml(humanize(agentRun.status))}</span>
+                </div>
+                <div class="task-meta task-card__meta">
+                  ${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+                </div>
+                <div class="link-row">
+                  ${
+                    agentRun.runId
+                      ? `
+                          <a class="inline-link" href="/dashboard?run=${encodeURIComponent(agentRun.runId)}">Open agent run</a>
+                          <a class="inline-link" href="/reports/${encodeURIComponent(agentRun.runId)}" target="_blank" rel="noreferrer">Standalone HTML report</a>
+                          <a class="inline-link" href="/api/runs/${encodeURIComponent(agentRun.runId)}/artifacts/report.html">Download HTML</a>
+                          <a class="inline-link" href="/api/runs/${encodeURIComponent(agentRun.runId)}/artifacts/report.json">Download JSON</a>
+                        `
+                      : `<span class="muted">No downloadable report is available for this agent yet.</span>`
+                  }
+                </div>
+              </article>
+            `;
+          })
+          .join("")}
+      </div>
+    </section>
   `;
 }
 
@@ -370,8 +469,14 @@ function renderMain(): string {
   const inputs = detail.inputs;
   const summary = report?.summary ?? "This run has saved artifacts, but no final report summary was available.";
   const overallScore = report?.overall_score ?? null;
+  const batchRole = inputs?.batchRole ?? "single";
   const metaPills = [
+    describeBatchRole(batchRole, inputs?.agentCount ?? 1),
     inputs?.persona ?? "Unknown persona",
+    batchRole === "aggregate" ? `${inputs?.completedAgentCount ?? 0}/${inputs?.agentCount ?? 1} completed` : null,
+    batchRole === "aggregate" && (inputs?.failedAgentCount ?? 0) > 0 ? `${inputs?.failedAgentCount ?? 0} failed` : null,
+    batchRole === "child" ? inputs?.agentLabel ?? "Agent run" : null,
+    batchRole === "child" ? inputs?.agentProfileLabel ?? null : null,
     inputs?.mobile ? "Mobile run" : "Desktop run",
     inputs?.headed ? "Headed browser" : "Headless browser",
     inputs?.ignoreHttpsErrors ? "Ignoring HTTPS errors" : "Strict HTTPS checks",
@@ -387,7 +492,7 @@ function renderMain(): string {
     <section class="panel hero-panel">
       <div class="hero-grid">
         <div>
-          <p class="eyebrow">Saved audit run</p>
+          <p class="eyebrow">${escapeHtml(describeBatchRole(batchRole, inputs?.agentCount ?? 1))}</p>
           <h2>${escapeHtml(detail.host)}</h2>
           <p class="hero-summary">${escapeHtml(summary)}</p>
           <div class="helper-row">
@@ -432,12 +537,15 @@ function renderMain(): string {
           <span class="muted">${escapeHtml(`${detail.tasks.length} tasks`)}</span>
         </div>
         <div class="helper-row" style="margin-top: 1rem;">
+          <span>${escapeHtml(describeBatchRole(batchRole, inputs?.agentCount ?? 1))}</span>
           <span>${escapeHtml(inputs?.taskPath ?? "Task path unavailable")}</span>
           <span>${escapeHtml(`${detail.accessibility?.violations.length ?? 0} accessibility findings`)}</span>
           <span>${escapeHtml(currentRunIdFromUrl() ?? detail.id)}</span>
         </div>
       </div>
     </section>
+
+    ${renderAgentPerspectivePanel(detail)}
 
     <section class="panel">
       <div class="section-heading">
