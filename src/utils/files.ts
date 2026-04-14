@@ -31,6 +31,13 @@ function resolveDataRoot(): string {
     return tempRoot;
   }
 
+  // In serverless environments like AWS Lambda, cwd starts with /var/task which is read-only
+  if (process.cwd().startsWith('/var/task')) {
+    const tempRoot = path.join(os.tmpdir(), "site-agent-pro");
+    ensureDir(tempRoot);
+    return tempRoot;
+  }
+
   return process.cwd();
 }
 
