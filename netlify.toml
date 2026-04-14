@@ -3,11 +3,9 @@
   publish = "netlify-static"
 
 [build.environment]
-  NODE_VERSION = "20.11.0"
+  NODE_VERSION = "22"
 
 [functions]
   directory = "dist/netlify/functions"
   external_node_modules = ["playwright", "@sparticuz/chromium"]
-  included_files = [
-    "dist/tasks/**"
-  ]
+  included_files = ["dist/tasks/**"]

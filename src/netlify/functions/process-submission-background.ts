@@ -2,7 +2,9 @@ import { readSubmission, uploadRunArtifacts, writeSubmission } from "../storage.
 import { processSubmissionBatch } from "../../core/processSubmissionBatch.js";
 
 export default async (req: Request): Promise<void> => {
+  console.log("Background submission function started");
   if (req.method !== "POST") {
+    console.log("Background submission: not POST, returning");
     return;
   }
 
@@ -17,6 +19,7 @@ export default async (req: Request): Promise<void> => {
   try {
     const body = (await req.json()) as { submissionId?: string };
     submissionId = body.submissionId?.trim() ?? "";
+    console.log(`Background submission: received submissionId ${submissionId}`);
   } catch {
     console.warn("Background submission request did not contain valid JSON.");
     return;
@@ -34,9 +37,11 @@ export default async (req: Request): Promise<void> => {
   }
 
   if (submission.status === "completed") {
+    console.log(`Background submission: submission ${submissionId} already completed`);
     return;
   }
 
+  console.log(`Background submission: starting processing for ${submissionId}`);
   const startedAt = new Date().toISOString();
   await processSubmissionBatch({
     submission: {
@@ -47,4 +52,5 @@ export default async (req: Request): Promise<void> => {
     uploadRunArtifacts,
     source: "netlify_submission_form"
   });
+  console.log(`Background submission: completed processing for ${submissionId}`);
 };
