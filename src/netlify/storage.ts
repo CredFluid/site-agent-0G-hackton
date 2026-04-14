@@ -48,12 +48,19 @@ type ClaimSubmissionResult =
     };
 
 function shouldUseBlobStorage(): boolean {
-  const useBlobs = process.env.NETLIFY === "true" || process.env.NETLIFY_LOCAL === "true";
+  const useBlobs =
+    process.env.NETLIFY_LOCAL === "true" ||
+    Boolean(process.env.SITE_ID) ||
+    Boolean(process.env.URL);
+
   console.log("storage mode", {
     useBlobs,
     NETLIFY: process.env.NETLIFY,
-    NETLIFY_LOCAL: process.env.NETLIFY_LOCAL
+    NETLIFY_LOCAL: process.env.NETLIFY_LOCAL,
+    SITE_ID: process.env.SITE_ID,
+    URL: process.env.URL
   });
+
   return useBlobs;
 }
 
