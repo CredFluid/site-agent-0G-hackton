@@ -36,7 +36,4 @@ Use different task sets for:
 
 Do not turn this into a pipeline gate until you have manually reviewed enough runs to understand its failure modes.
 
-## 6. Respect legal and ethical limits
 
-Do not use this to bypass anti-bot controls, paywalls, or account security.
-That is not clever. It is reckless.

@@ -10,6 +10,7 @@ export const MIN_TOTAL_RUN_DURATION_MS = 60000;
 export const MIN_BROWSER_EXECUTION_BUDGET_MS = 45000;
 export const MIN_REPORTING_RESERVE_MS = 15000;
 export const MAX_REPORTING_RESERVE_MS = 45000;
+export const POST_RUN_AUDIT_RESERVE_MS = 45000;
 export const DETECTED_DEVICE_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 export function clampRunDurationMs(value: number): number {
@@ -35,6 +36,11 @@ export function deriveBrowserExecutionBudgetMs(totalRunDurationMs: number): numb
   return clampedTotalRunDurationMs - deriveReportingReserveMs(clampedTotalRunDurationMs);
 }
 
+function normalizeOptionalString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 const EnvSchema = z.object({
   OPENAI_API_KEY: z.string().min(1, "OPENAI_API_KEY is required"),
   OPENAI_MODEL: z.string().default("gpt-5"),
@@ -44,10 +50,14 @@ const EnvSchema = z.object({
     .optional()
     .transform((value: string | undefined) => value !== "false"),
   MAX_SESSION_DURATION_MS: z.coerce.number().int().positive().default(DEFAULT_TOTAL_RUN_DURATION_MS),
-  MAX_STEPS_PER_TASK: z.coerce.number().int().positive().default(10),
+  MAX_STEPS_PER_TASK: z.coerce.number().int().positive().default(32),
   ACTION_DELAY_MS: z.coerce.number().int().nonnegative().default(600),
   NAVIGATION_TIMEOUT_MS: z.coerce.number().int().positive().default(25000),
-  REPORT_TTL_DAYS: z.coerce.number().int().positive().default(30)
+  REPORT_TTL_DAYS: z.coerce.number().int().positive().default(30),
+  PLAYWRIGHT_STORAGE_STATE_PATH: z
+    .string()
+    .optional()
+    .transform((value: string | undefined) => normalizeOptionalString(value))
 });
 
 const parsed = EnvSchema.parse(process.env);
@@ -64,10 +74,12 @@ export const config = {
   maxSessionDurationMs,
   browserExecutionBudgetMs: deriveBrowserExecutionBudgetMs(maxSessionDurationMs),
   reportingReserveMs: deriveReportingReserveMs(maxSessionDurationMs),
+  postRunAuditReserveMs: POST_RUN_AUDIT_RESERVE_MS,
   maxStepsPerTask: parsed.MAX_STEPS_PER_TASK,
   actionDelayMs: parsed.ACTION_DELAY_MS,
   navigationTimeoutMs: parsed.NAVIGATION_TIMEOUT_MS,
   reportTtlDays: parsed.REPORT_TTL_DAYS,
+  playwrightStorageStatePath: parsed.PLAYWRIGHT_STORAGE_STATE_PATH,
   desktopViewport: { width: 1440, height: 900 },
   mobileViewport: { width: 390, height: 844 }
 };

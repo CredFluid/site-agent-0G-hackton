@@ -33,7 +33,26 @@ function isPrivateIpv6(hostname: string): boolean {
   return normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:");
 }
 
-export function validatePublicUrl(rawUrl: string): { normalizedUrl?: string; valid: boolean; reason?: string } {
+function isLocalHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost" || normalized.endsWith(".localhost") || normalized.endsWith(".local");
+}
+
+export type SubmissionTargetMode = "public" | "localhost";
+
+export const DEFAULT_SUBMISSION_TARGET_MODE: SubmissionTargetMode = "public";
+
+export function parseSubmissionTargetMode(value: unknown): SubmissionTargetMode {
+  return value === "localhost" ? "localhost" : DEFAULT_SUBMISSION_TARGET_MODE;
+}
+
+export function validateSubmissionUrl(
+  rawUrl: string,
+  args: {
+    allowPrivateHosts?: boolean;
+    targetMode?: SubmissionTargetMode;
+  } = {}
+): { normalizedUrl?: string; valid: boolean; reason?: string } {
   let parsed: URL;
 
   try {
@@ -43,16 +62,28 @@ export function validatePublicUrl(rawUrl: string): { normalizedUrl?: string; val
   }
 
   if (!["http:", "https:"].includes(parsed.protocol)) {
-    return { valid: false, reason: "Only public http and https URLs are allowed in V1." };
+    return { valid: false, reason: "Only http and https URLs are allowed." };
   }
 
   const hostname = parsed.hostname.toLowerCase();
-  if (hostname === "localhost" || hostname.endsWith(".local")) {
-    return { valid: false, reason: "Localhost and .local addresses are not allowed in V1. Use a public URL." };
+  const canUsePrivateHosts = Boolean(args.allowPrivateHosts) && args.targetMode === "localhost";
+
+  if (!canUsePrivateHosts && isLocalHostname(hostname)) {
+    return {
+      valid: false,
+      reason: args.allowPrivateHosts
+        ? "Switch target to Localhost/private dev site to use localhost, .localhost, or .local addresses."
+        : "Localhost, .localhost, and .local addresses are not allowed in V1. Use a public URL."
+    };
   }
 
-  if (isPrivateIpv4(hostname) || isPrivateIpv6(hostname)) {
-    return { valid: false, reason: "Private network addresses are not allowed in V1. Use a public URL." };
+  if (!canUsePrivateHosts && (isPrivateIpv4(hostname) || isPrivateIpv6(hostname))) {
+    return {
+      valid: false,
+      reason: args.allowPrivateHosts
+        ? "Switch target to Localhost/private dev site to use 127.0.0.1 or private network addresses."
+        : "Private network addresses are not allowed in V1. Use a public URL."
+    };
   }
 
   parsed.hash = "";
@@ -61,4 +92,11 @@ export function validatePublicUrl(rawUrl: string): { normalizedUrl?: string; val
     valid: true,
     normalizedUrl: parsed.toString()
   };
+}
+
+export function validatePublicUrl(rawUrl: string): { normalizedUrl?: string; valid: boolean; reason?: string } {
+  return validateSubmissionUrl(rawUrl, {
+    allowPrivateHosts: false,
+    targetMode: DEFAULT_SUBMISSION_TARGET_MODE
+  });
 }

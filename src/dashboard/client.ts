@@ -1,4 +1,5 @@
 import type { DashboardRunDetail, DashboardRunSummary } from "./contracts.js";
+import { buildVisitRecap, buildVisitSummary, filterVisitorFacingItems } from "./narrative.js";
 
 type AppState = {
   detail: DashboardRunDetail | null;
@@ -6,7 +7,42 @@ type AppState = {
   loadingDetail: boolean;
   loadingRuns: boolean;
   runs: DashboardRunSummary[];
+  sidebarCollapsed: boolean;
+  summaryRailCollapsed: boolean;
   selectedRunId: string | null;
+};
+
+type AgentCardModel = {
+  idLabel: string;
+  persona: string;
+  summary: string;
+  score: number | null;
+  stateClass: string;
+  pipClass: string;
+  progressClass: string;
+  progressWidth: number;
+  runId: string | null;
+  selected: boolean;
+};
+
+type FeedbackItem = {
+  source: string;
+  text: string;
+  tagLabel: string;
+  tagClass: string;
+};
+
+type IssueItem = {
+  iconClass: string;
+  iconLabel: string;
+  text: string;
+  countLabel: string;
+};
+
+type ActivityItem = {
+  time: string;
+  idLabel: string | null;
+  text: string;
 };
 
 const appRoot = document.getElementById("app");
@@ -16,6 +52,40 @@ if (!appRoot) {
 }
 
 const dashboardRoot: HTMLElement = appRoot;
+const SIDEBAR_COLLAPSE_STORAGE_KEY = "agentprobe:dashboard-sidebar-collapsed";
+const SUMMARY_RAIL_COLLAPSE_STORAGE_KEY = "agentprobe:dashboard-summary-collapsed";
+
+function readStoredBooleanPreference(key: string): boolean {
+  try {
+    return window.localStorage.getItem(key) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeStoredBooleanPreference(key: string, value: boolean): void {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // Ignore storage failures and keep the in-memory state.
+  }
+}
+
+function readSidebarCollapsedPreference(): boolean {
+  return readStoredBooleanPreference(SIDEBAR_COLLAPSE_STORAGE_KEY);
+}
+
+function writeSidebarCollapsedPreference(collapsed: boolean): void {
+  writeStoredBooleanPreference(SIDEBAR_COLLAPSE_STORAGE_KEY, collapsed);
+}
+
+function readSummaryRailCollapsedPreference(): boolean {
+  return readStoredBooleanPreference(SUMMARY_RAIL_COLLAPSE_STORAGE_KEY);
+}
+
+function writeSummaryRailCollapsedPreference(collapsed: boolean): void {
+  writeStoredBooleanPreference(SUMMARY_RAIL_COLLAPSE_STORAGE_KEY, collapsed);
+}
 
 const state: AppState = {
   detail: null,
@@ -23,6 +93,8 @@ const state: AppState = {
   loadingDetail: false,
   loadingRuns: true,
   runs: [],
+  sidebarCollapsed: readSidebarCollapsedPreference(),
+  summaryRailCollapsed: readSummaryRailCollapsedPreference(),
   selectedRunId: null
 };
 
@@ -52,6 +124,37 @@ function formatDate(value: string | null | undefined, timeZone?: string | null):
   }).format(date);
 }
 
+function formatDashboardDate(value: string | null | undefined): string {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) {
+    return value ?? "Today";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    year: "numeric"
+  }).format(date);
+}
+
+function formatClock(value: string | null | undefined, timeZone?: string | null): string {
+  if (!value) {
+    return "--:--";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    ...(timeZone ? { timeZone } : {})
+  }).format(date);
+}
+
 function humanize(value: string): string {
   return value.replaceAll("_", " ");
 }
@@ -68,24 +171,151 @@ function scoreTone(score: number | null | undefined): "high" | "mid" | "low" {
   return "low";
 }
 
+function formatScore(score: number | null | undefined): string {
+  if (score === null || score === undefined) {
+    return "n/a";
+  }
+
+  return Number.isInteger(score) ? `${score}` : score.toFixed(1);
+}
+
+function computeAverageScore(runs: DashboardRunSummary[]): number | null {
+  const scores = runs
+    .map((run) => run.overallScore)
+    .filter((score): score is number => score !== null);
+
+  if (scores.length === 0) {
+    return null;
+  }
+
+  const average = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+  return Math.round(average * 10) / 10;
+}
+
 function formatAgentCount(agentCount: number): string {
   return `${agentCount} agent${agentCount === 1 ? "" : "s"}`;
 }
 
 function describeBatchRole(batchRole: DashboardRunSummary["batchRole"], agentCount: number): string {
   if (batchRole === "aggregate") {
-    return `${formatAgentCount(agentCount)} review panel`;
+    return `${formatAgentCount(agentCount)} task panel`;
   }
 
   if (batchRole === "child") {
-    return "Individual agent perspective";
+    return "Individual agent run";
   }
 
   return "Single-agent run";
 }
 
+function getActionDescription(action: string, target: string): string {
+  const trimmedTarget = target.trim();
+
+  switch (action) {
+    case "click":
+      return trimmedTarget ? `I clicked "${trimmedTarget}"` : "I clicked an element";
+    case "type":
+      return trimmedTarget ? `I typed into "${trimmedTarget}"` : "I typed into a field";
+    case "scroll":
+      return "I scrolled the page";
+    case "wait":
+      return "I waited for the page to respond";
+    case "back":
+      return "I went back";
+    case "extract":
+      return "I captured the page state";
+    case "stop":
+      return "I stopped";
+    default:
+      return `I performed "${action}"`;
+  }
+}
+
 function safeHref(url: string): string | null {
   return /^https?:\/\//i.test(url) ? url : null;
+}
+
+function buildArtifactHref(runId: string, fileName: string | null | undefined): string | null {
+  const normalized = fileName?.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  return `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(normalized)}`;
+}
+
+function describeClickReplay(inputs: DashboardRunDetail["inputs"]): string {
+  if (!inputs?.clickReplayArtifact) {
+    return "";
+  }
+
+  const frameLabel =
+    inputs.clickReplayFrameCount && inputs.clickReplayFrameCount > 0
+      ? `${inputs.clickReplayFrameCount} frame${inputs.clickReplayFrameCount === 1 ? "" : "s"}`
+      : "saved click frames";
+  const durationLabel =
+    inputs.clickReplayDurationMs && inputs.clickReplayDurationMs > 0
+      ? ` over ${(Math.round((inputs.clickReplayDurationMs / 1000) * 10) / 10).toFixed(1)}s`
+      : "";
+
+  return `Compact animated WebP with highlighted click targets, built from ${frameLabel}${durationLabel}.`;
+}
+
+function renderClickReplayStatus(detail: DashboardRunDetail, hasClickFrames: boolean): string {
+  const inputs = detail.inputs;
+  const clickReplayHref = buildArtifactHref(detail.id, inputs?.clickReplayArtifact);
+
+  if (clickReplayHref) {
+    return `
+      <div class="warning-note" style="margin-top: 12px;"><strong>Click replay.</strong> ${escapeHtml(describeClickReplay(inputs))}</div>
+      <div class="step-proof" style="margin-top: 12px;">
+        <figure class="proof-shot">
+          <a href="${escapeHtml(clickReplayHref)}" target="_blank" rel="noreferrer">
+            <img src="${escapeHtml(clickReplayHref)}" alt="Animated click replay for this run" loading="lazy" />
+          </a>
+          <figcaption>Animated WebP replay</figcaption>
+        </figure>
+      </div>
+    `;
+  }
+
+  if (inputs?.batchRole === "aggregate" && (inputs.agentRuns?.length ?? 0) > 0) {
+    const agentReplayLinks = inputs.agentRuns
+      .filter((agentRun) => Boolean(agentRun.runId))
+      .sort((left, right) => left.index - right.index)
+      .map((agentRun) => {
+        const childRunId = agentRun.runId as string;
+        const runHref = `/dashboard?run=${encodeURIComponent(childRunId)}`;
+        const replayHref =
+          agentRun.clickReplayAvailable || agentRun.clickReplayArtifact
+            ? buildArtifactHref(childRunId, agentRun.clickReplayArtifact ?? "click-replay.webp")
+            : null;
+
+        return `
+          <div class="link-row" style="margin-top: 8px;">
+            <strong>${escapeHtml(displayAgentPersona(agentRun.profileLabel, agentRun.label))}</strong>
+            <a class="inline-link" href="${escapeHtml(runHref)}">Open run</a>
+            ${replayHref ? `<a class="inline-link" href="${escapeHtml(replayHref)}" target="_blank" rel="noreferrer">Open replay</a>` : `<span class="muted">Replay unavailable</span>`}
+          </div>
+        `;
+      })
+      .join("");
+
+    return `
+      <div class="warning-note" style="margin-top: 12px;"><strong>Click replay.</strong> This is the aggregate summary run. Use the links below to open each agent run directly, or jump straight into an available replay.</div>
+      ${agentReplayLinks}
+    `;
+  }
+
+  if (hasClickFrames) {
+    return `<div class="warning-note" style="margin-top: 12px;"><strong>Click replay.</strong> Click frames were saved for this run, but the combined animated WebP was not available.</div>`;
+  }
+
+  return `<div class="warning-note" style="margin-top: 12px;"><strong>Click replay.</strong> No click actions were recorded in this run, so there was nothing to turn into a replay.</div>`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function currentRunIdFromUrl(): string | null {
@@ -123,10 +353,7 @@ async function loadRuns(): Promise<void> {
   try {
     state.runs = await fetchJson<DashboardRunSummary[]>("/api/runs");
     const requestedRunId = currentRunIdFromUrl();
-    const fallbackRun =
-      state.runs.find((run) => run.id === requestedRunId) ??
-      state.runs[0] ??
-      null;
+    const fallbackRun = state.runs.find((run) => run.id === requestedRunId) ?? state.runs[0] ?? null;
 
     state.loadingRuns = false;
     render();
@@ -134,9 +361,8 @@ async function loadRuns(): Promise<void> {
     if (requestedRunId) {
       const loadedRequested = await loadRunDetail(requestedRunId, false);
       if (!loadedRequested && fallbackRun && fallbackRun.id !== requestedRunId) {
-        const missingRunMessage = `Run '${requestedRunId}' was not found. Showing the latest visible run instead.`;
+        state.error = `Run '${requestedRunId}' was not found. Showing the latest visible run instead.`;
         await loadRunDetail(fallbackRun.id, false);
-        state.error = missingRunMessage;
         render();
       }
       return;
@@ -176,26 +402,302 @@ async function loadRunDetail(runId: string, pushHistory: boolean): Promise<boole
   }
 }
 
+function classifyFinding(text: string, positive = false): Pick<FeedbackItem, "tagClass" | "tagLabel"> {
+  if (positive) {
+    return { tagClass: "tag-pos", tagLabel: "GOOD" };
+  }
+
+  if (/(slow|lag|latency|performance|preload|asset|websocket|load)/i.test(text)) {
+    return { tagClass: "tag-perf", tagLabel: "PERF" };
+  }
+
+  if (/(bug|error|broken|fail|failed|missing|hidden|did not|didn't|could not|can't|cannot|not respond|unclear)/i.test(text)) {
+    return { tagClass: "tag-bug", tagLabel: "BUG" };
+  }
+
+  return { tagClass: "tag-ux", tagLabel: "UX" };
+}
+
+function classifyIssue(text: string): Pick<IssueItem, "iconClass" | "iconLabel"> {
+  if (/(slow|lag|latency|performance|preload|asset|websocket|load)/i.test(text)) {
+    return { iconClass: "i-info", iconLabel: "i" };
+  }
+
+  if (/(bug|error|broken|fail|failed|missing|hidden|did not|didn't|could not|can't|cannot|not respond)/i.test(text)) {
+    return { iconClass: "i-bug", iconLabel: "!" };
+  }
+
+  return { iconClass: "i-ux", iconLabel: "~" };
+}
+
+function formatAgentId(index: number): string {
+  return `AGT-${String(index).padStart(2, "0")}`;
+}
+
+function displayAgentPersona(profileLabel: string | null | undefined, fallback: string): string {
+  const trimmed = profileLabel?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
+function buildAgentCards(detail: DashboardRunDetail): AgentCardModel[] {
+  const inputs = detail.inputs;
+
+  if (inputs?.batchRole === "aggregate" && inputs.agentRuns.length > 0) {
+    return inputs.agentRuns
+      .slice()
+      .sort((left, right) => left.index - right.index)
+      .map((agentRun) => {
+        const status = agentRun.status;
+        const summary =
+          agentRun.reportSummary ??
+          agentRun.error ??
+          (status === "completed"
+            ? "Finished the accepted tasks and submitted final outcomes."
+            : status === "failed"
+              ? "The run ended with an error before the accepted tasks could finish."
+              : status === "running"
+                ? "Still working through the accepted tasks."
+                : "Queued and waiting to start.");
+
+        return {
+          idLabel: formatAgentId(agentRun.index),
+          persona: displayAgentPersona(agentRun.profileLabel, agentRun.label),
+          summary,
+          score: agentRun.overallScore,
+          stateClass:
+            status === "completed" ? "st-done" : status === "running" ? "st-active" : status === "failed" ? "st-error" : "st-idle",
+          pipClass:
+            status === "completed" ? "pip-green" : status === "running" ? "pip-blue" : status === "failed" ? "pip-amber" : "pip-gray",
+          progressClass: status === "completed" ? "prog-green" : status === "running" ? "prog-blue" : "prog-amber",
+          progressWidth: status === "completed" ? 100 : status === "running" ? 62 : status === "failed" ? 100 : 18,
+          runId: agentRun.runId,
+          selected: agentRun.runId === state.selectedRunId
+        };
+      });
+  }
+
+  const batchRole = inputs?.batchRole ?? "single";
+  const persona =
+    batchRole === "child"
+      ? inputs?.agentProfileLabel ?? inputs?.agentLabel ?? "Focused task runner"
+      : inputs?.persona ?? "Human visitor";
+  const summary = buildVisitSummary(detail);
+
+  return [
+    {
+      idLabel: batchRole === "child" ? formatAgentId(inputs?.agentIndex ?? 1) : "AGT-01",
+      persona,
+      summary,
+      score: detail.report?.overall_score ?? null,
+      stateClass: detail.report ? "st-done" : "st-idle",
+      pipClass: detail.report ? "pip-green" : "pip-gray",
+      progressClass: detail.report ? "prog-green" : "prog-amber",
+      progressWidth: detail.report ? 100 : 24,
+      runId: detail.id,
+      selected: true
+    }
+  ];
+}
+
+function buildFeedbackItems(detail: DashboardRunDetail): FeedbackItem[] {
+  const report = detail.report;
+  const inputs = detail.inputs;
+  const items: FeedbackItem[] = [];
+
+  if (inputs?.batchRole === "aggregate") {
+    for (const agentRun of inputs.agentRuns.slice().sort((left, right) => left.index - right.index)) {
+      const summary = agentRun.reportSummary ?? agentRun.error;
+      if (!summary) {
+        continue;
+      }
+
+      const classification =
+        agentRun.status === "completed" && (agentRun.overallScore ?? 0) >= 8
+          ? { tagClass: "tag-pos", tagLabel: "GOOD" }
+          : agentRun.status === "failed"
+            ? { tagClass: "tag-bug", tagLabel: "BUG" }
+            : classifyFinding(summary);
+
+      items.push({
+        source: formatAgentId(agentRun.index),
+        text: summary,
+        tagClass: classification.tagClass,
+        tagLabel: classification.tagLabel
+      });
+    }
+  }
+
+  for (const strength of filterVisitorFacingItems(report?.strengths ?? []).slice(0, 2)) {
+    const classification = classifyFinding(strength, true);
+    items.push({
+      source: "VISIT",
+      text: strength,
+      tagClass: classification.tagClass,
+      tagLabel: classification.tagLabel
+    });
+  }
+
+  for (const weakness of filterVisitorFacingItems(report?.weaknesses ?? []).slice(0, 4)) {
+    const classification = classifyFinding(weakness);
+    items.push({
+      source: "VISIT",
+      text: weakness,
+      tagClass: classification.tagClass,
+      tagLabel: classification.tagLabel
+    });
+  }
+
+  for (const fix of filterVisitorFacingItems(report?.top_fixes ?? []).slice(0, 2)) {
+    items.push({
+      source: "FIX",
+      text: fix,
+      tagClass: "tag-ux",
+      tagLabel: "FIX"
+    });
+  }
+
+  for (const violation of detail.accessibility?.violations.slice(0, 2) ?? []) {
+    items.push({
+      source: "AXE",
+      text: `${violation.help} (${violation.nodes} affected ${violation.nodes === 1 ? "node" : "nodes"})`,
+      tagClass: "tag-bug",
+      tagLabel: "A11Y"
+    });
+  }
+
+  return items.slice(0, 8);
+}
+
+function buildIssueItems(detail: DashboardRunDetail): IssueItem[] {
+  const issues: IssueItem[] = [];
+
+  for (const weakness of filterVisitorFacingItems(detail.report?.weaknesses ?? []).slice(0, 3)) {
+    const classification = classifyIssue(weakness);
+    issues.push({
+      iconClass: classification.iconClass,
+      iconLabel: classification.iconLabel,
+      text: weakness,
+      countLabel: "Observed"
+    });
+  }
+
+  for (const violation of detail.accessibility?.violations.slice(0, 1) ?? []) {
+    issues.push({
+      iconClass: "i-bug",
+      iconLabel: "!",
+      text: violation.help,
+      countLabel: `${violation.nodes} ${violation.nodes === 1 ? "node" : "nodes"}`
+    });
+  }
+
+  for (const fix of filterVisitorFacingItems(detail.report?.top_fixes ?? []).slice(0, 1)) {
+    issues.push({
+      iconClass: "i-info",
+      iconLabel: "i",
+      text: fix,
+      countLabel: "Fix first"
+    });
+  }
+
+  if (issues.length === 0) {
+    issues.push({
+      iconClass: "i-info",
+      iconLabel: "i",
+      text: "No major issues were recorded for this visit.",
+      countLabel: "Clear"
+    });
+  }
+
+  return issues.slice(0, 4);
+}
+
+function buildPersonaChips(detail: DashboardRunDetail): string[] {
+  const inputs = detail.inputs;
+
+  if (inputs?.batchRole === "aggregate" && inputs.agentRuns.length > 0) {
+    const profileLabels = Array.from(
+      new Set(
+        inputs.agentRuns
+          .map((agentRun) => agentRun.profileLabel.trim())
+          .filter(Boolean)
+      )
+    );
+
+    if (profileLabels.length > 0) {
+      return profileLabels;
+    }
+  }
+
+  if (inputs?.agentProfileLabel) {
+    return [inputs.agentProfileLabel];
+  }
+
+  if (inputs?.persona) {
+    return [inputs.persona];
+  }
+
+  return ["Human visitor"];
+}
+
+function buildActivityItems(detail: DashboardRunDetail): ActivityItem[] {
+  const inputs = detail.inputs;
+  const timezone = inputs?.synchronizedTimezone ?? null;
+
+  if (inputs?.batchRole === "aggregate" && inputs.agentRuns.length > 0) {
+    return inputs.agentRuns
+      .slice()
+      .sort((left, right) => {
+        const rightTime = new Date(right.completedAt ?? right.startedAt ?? 0).getTime();
+        const leftTime = new Date(left.completedAt ?? left.startedAt ?? 0).getTime();
+        return rightTime - leftTime;
+      })
+      .map((agentRun) => ({
+        time: formatClock(agentRun.completedAt ?? agentRun.startedAt, timezone),
+        idLabel: formatAgentId(agentRun.index),
+        text:
+          agentRun.status === "completed"
+            ? `completed the visit · ${formatScore(agentRun.overallScore)}/10`
+            : agentRun.status === "failed"
+              ? `stopped with an error${agentRun.error ? ` · ${agentRun.error}` : ""}`
+              : agentRun.status === "running"
+                ? "is still moving through the site"
+                : "is queued for launch"
+      }))
+      .slice(0, 5);
+  }
+
+  const history = detail.tasks
+    .flatMap((task) => task.history)
+    .slice()
+    .sort((left, right) => new Date(right.time).getTime() - new Date(left.time).getTime());
+
+  return history.slice(0, 5).map((entry) => ({
+    time: formatClock(entry.time, timezone),
+    idLabel: null,
+    text: `${getActionDescription(entry.decision.action, entry.decision.target)} · ${entry.result.note}`
+  }));
+}
+
 function renderRunList(): string {
   if (state.loadingRuns && state.runs.length === 0) {
-    return `<div class="empty-stack"><div><h3>Loading runs</h3><p class="muted">Scanning the <code>runs/</code> directory.</p></div></div>`;
+    return `<div class="empty-stack"><div><h3>Loading runs</h3><p class="muted">Scanning saved artifacts.</p></div></div>`;
   }
 
   if (state.runs.length === 0) {
-    return `<div class="empty-stack"><div><h3>No runs yet</h3><p class="muted">Generate a report from the CLI and it will show up here automatically.</p></div></div>`;
+    return `<div class="empty-stack"><div><h3>No runs yet</h3><p class="muted">Your first finished task run will appear here automatically.</p></div></div>`;
   }
 
   return state.runs
     .map((run) => {
       const isActive = run.id === state.selectedRunId;
-      const summary = run.summary ?? "No report summary has been generated for this run yet.";
-      const scoreLabel = run.overallScore === null ? "n/a" : `${run.overallScore}`;
+      const summary = run.summary ?? "This run does not have a saved summary yet.";
+      const scoreLabel = formatScore(run.overallScore);
       const modes = [
         describeBatchRole(run.batchRole, run.agentCount),
         run.mobile ? "Mobile" : "Desktop",
         run.headed ? "Headed" : "Headless",
         run.batchRole === "aggregate"
-          ? `${run.completedAgentCount}/${run.agentCount} completed${run.failedAgentCount > 0 ? `, ${run.failedAgentCount} failed` : ""}`
+          ? `${run.completedAgentCount}/${run.agentCount} complete${run.failedAgentCount > 0 ? ` · ${run.failedAgentCount} failed` : ""}`
           : null
       ];
 
@@ -211,7 +713,6 @@ function renderRunList(): string {
           <p class="run-summary">${escapeHtml(summary)}</p>
           <div class="mini-meta">
             ${modes.filter((mode): mode is string => Boolean(mode)).map((mode) => `<span>${escapeHtml(mode)}</span>`).join("")}
-            <span>${escapeHtml(`${run.taskCount} tasks`)}</span>
           </div>
         </button>
       `;
@@ -219,136 +720,201 @@ function renderRunList(): string {
     .join("");
 }
 
-function renderScoreCards(detail: DashboardRunDetail): string {
-  const report = detail.report;
-  if (!report) {
-    return `
-      <div class="score-card">
-        <div class="muted">Task coverage</div>
-        <div class="score-card__value"><strong>${detail.tasks.length}</strong><span>tasks</span></div>
-        <div class="score-bar"><span style="width: 100%"></span></div>
-      </div>
-      <div class="score-card">
-        <div class="muted">Accessibility findings</div>
-        <div class="score-card__value"><strong>${detail.accessibility?.violations.length ?? 0}</strong><span>issues</span></div>
-        <div class="score-bar"><span style="width: 100%"></span></div>
-      </div>
-      <div class="score-card">
-        <div class="muted">Raw events</div>
-        <div class="score-card__value"><strong>${detail.rawEventCount}</strong><span>events</span></div>
-        <div class="score-bar"><span style="width: 100%"></span></div>
-      </div>
-    `;
-  }
-
-  return Object.entries(report.scores)
-    .map(([label, value]) => `
-      <article class="score-card">
-        <div class="muted">${escapeHtml(humanize(label))}</div>
-        <div class="score-card__value">
-          <strong>${value}</strong>
-          <span>/10</span>
-        </div>
-        <div class="score-bar"><span style="width: ${Math.max(10, value * 10)}%"></span></div>
-      </article>
-    `)
-    .join("");
-}
-
-function renderList(title: string, items: string[], emptyCopy: string): string {
-  if (items.length === 0) {
-    return `<div class="panel"><div class="section-heading"><h3>${escapeHtml(title)}</h3></div><div class="warning-note">${escapeHtml(emptyCopy)}</div></div>`;
-  }
+function renderMetricsGrid(detail: DashboardRunDetail | null): string {
+  const totalRuns = state.runs.length;
+  const totalAgents = state.runs.reduce((sum, run) => sum + run.agentCount, 0);
+  const selectedInputs = detail?.inputs;
+  const findingsCount = detail
+    ? filterVisitorFacingItems(detail.report?.weaknesses ?? []).length +
+      filterVisitorFacingItems(detail.report?.top_fixes ?? []).length +
+      (detail.accessibility?.violations.length ?? 0)
+    : 0;
+  const latestRun = state.runs[0] ?? null;
+  const averageScore = computeAverageScore(state.runs);
 
   return `
-    <div class="panel">
-      <div class="section-heading"><h3>${escapeHtml(title)}</h3></div>
-      <ul class="prose-list">
-        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-      </ul>
-    </div>
+    <section class="metrics-grid">
+      <article class="metric-card">
+        <div class="metric-label">Total runs</div>
+        <div class="metric-val">${totalRuns}</div>
+        <div class="metric-delta ${totalRuns > 0 ? "delta-up" : ""}">${escapeHtml(latestRun ? `Latest ${formatDate(latestRun.startedAt)}` : "Waiting for the first task run")}</div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Agents deployed</div>
+        <div class="metric-val">${totalAgents}</div>
+        <div class="metric-delta">${escapeHtml(detail ? `${selectedInputs?.agentCount ?? 1} in this run` : "Across saved runs")}</div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Issues found</div>
+        <div class="metric-val" style="color: var(--red);">${detail ? findingsCount : 0}</div>
+        <div class="metric-delta ${findingsCount > 0 ? "delta-down" : ""}">${escapeHtml(detail ? "From the selected run" : "Open a run to inspect findings")}</div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Avg UX score</div>
+        <div class="metric-val" style="color: var(--accent);">${escapeHtml(formatScore(averageScore))}</div>
+        <div class="metric-delta ${averageScore !== null && averageScore >= 7 ? "delta-up" : averageScore !== null ? "delta-down" : ""}">${escapeHtml(detail?.report ? `Selected run ${formatScore(detail.report.overall_score)}/10` : "Across scored runs")}</div>
+      </article>
+    </section>
   `;
 }
 
-function renderAgentPerspectivePanel(detail: DashboardRunDetail): string {
-  const inputs = detail.inputs;
-  if (!inputs || inputs.batchRole !== "aggregate" || inputs.agentRuns.length === 0) {
-    return "";
-  }
-
-  const completedCount = inputs.agentRuns.filter((agentRun) => agentRun.status === "completed").length;
-  const failedCount = inputs.agentRuns.filter((agentRun) => agentRun.status === "failed").length;
+function renderNewTestCard(detail: DashboardRunDetail | null): string {
+  const urlValue = detail?.inputs?.baseUrl ?? "";
+  const selectedAgents = String(detail?.inputs?.agentCount ?? 1);
+  const submittedInstructions = detail?.inputs?.instructionText ?? detail?.inputs?.customTasks?.join("\n") ?? "";
 
   return `
-    <section class="panel">
-      <div class="section-heading">
-        <h3>Agent perspectives</h3>
-        <span class="muted">${escapeHtml(`${completedCount}/${inputs.agentCount} completed${failedCount > 0 ? `, ${failedCount} failed` : ""}`)}</span>
+    <form class="new-test-card" id="new-test" method="POST" action="/submit" enctype="multipart/form-data">
+      <div class="card-title">New test</div>
+      <div class="url-row">
+        <input class="url-input" name="url" type="url" value="${escapeHtml(urlValue)}" placeholder="https://app.yourproduct.com" required />
+        <button class="btn btn-primary" type="submit">▶ Start task run</button>
       </div>
-      <div class="list-grid">
-        ${inputs.agentRuns
-          .slice()
-          .sort((left, right) => left.index - right.index)
-          .map((agentRun) => {
-            const summary = agentRun.reportSummary ?? agentRun.error ?? "This agent has not produced a final report yet.";
-            const score = agentRun.overallScore === null ? "n/a" : `${agentRun.overallScore}/10`;
-            const meta = [
-              agentRun.profileLabel,
-              agentRun.personaName,
-              `Score: ${score}`,
-              agentRun.completedAt ? `Finished ${formatDate(agentRun.completedAt, inputs.synchronizedTimezone ?? null)}` : null
-            ].filter((item): item is string => Boolean(item));
+      <p class="task-intro">Paste the instructions in one box or upload a text or JSON file. The agents will first understand what the site appears to be for, then perform only the instructions you supplied.</p>
+      <div class="instruction-panel">
+        <label>
+          <span class="instruction-label">Instructions</span>
+          <textarea class="instruction-input" name="instructions" placeholder="- Check what a new user is meant to do first&#10;- Try the pricing path and explain whether it is clear&#10;- Stop before entering private details">${escapeHtml(submittedInstructions)}</textarea>
+        </label>
+      </div>
+      <div class="file-input-row">
+        <label>
+          <span class="instruction-label">Instruction file (optional)</span>
+          <input class="file-input" type="file" name="instructions_file" accept=".txt,.md,.json,.csv,text/plain,application/json" />
+        </label>
+      </div>
+      <div class="config-row">
+        <select class="config-select" name="agents">
+          ${[1, 2, 3, 4, 5]
+            .map((count) => `<option value="${count}" ${selectedAgents === `${count}` ? "selected" : ""}>${count} ${count === 1 ? "agent" : "agents"}</option>`)
+            .join("")}
+        </select>
+        <span class="tag on">task-driven</span>
+        <span class="tag on">dashboard input only</span>
+        <span class="tag on">no fallback personas</span>
+      </div>
+    </form>
+  `;
+}
 
-            return `
-              <article class="task-card">
-                <div class="task-card__header">
-                  <div>
-                    <h3>${escapeHtml(agentRun.label)}</h3>
-                    <p class="task-card__reason">${escapeHtml(summary)}</p>
-                  </div>
-                  <span class="pill pill--status-${escapeHtml(agentRun.status)}">${escapeHtml(humanize(agentRun.status))}</span>
+function renderAgentGrid(detail: DashboardRunDetail): string {
+  const inputs = detail.inputs;
+  const report = detail.report;
+  const batchRole = inputs?.batchRole ?? "single";
+  const badgeClass =
+    batchRole === "aggregate" && (inputs?.completedAgentCount ?? 0) < (inputs?.agentCount ?? 1)
+      ? "live-badge"
+      : detail.warnings.length > 0
+        ? "live-badge warning"
+        : "live-badge";
+  const badgeLabel =
+    batchRole === "aggregate" && (inputs?.completedAgentCount ?? 0) < (inputs?.agentCount ?? 1)
+      ? "LIVE"
+      : detail.warnings.length > 0
+        ? "CHECK"
+        : "SAVED";
+  const badgeDotClass = detail.warnings.length > 0 ? "live-dot warning" : "live-dot";
+  const cards = buildAgentCards(detail);
+  const feedbackItems = buildFeedbackItems(detail);
+  const subtitle =
+    batchRole === "aggregate"
+      ? `${inputs?.completedAgentCount ?? 0} of ${inputs?.agentCount ?? 1} complete${(inputs?.failedAgentCount ?? 0) > 0 ? ` · ${inputs?.failedAgentCount ?? 0} failed` : ""}`
+      : `${detail.tasks.length} accepted ${detail.tasks.length === 1 ? "task" : "tasks"} · ${report ? `${formatScore(report.overall_score)}/10 overall` : "output pending"}`;
+  const warningList = detail.warnings.length > 0
+    ? `
+        <div class="warning-note" style="margin-bottom: 18px;">
+          ${detail.warnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join("")}
+        </div>
+      `
+    : "";
+
+  return `
+    <section class="panel" id="live-run">
+      <div class="panel-head">
+        <div class="${badgeClass}"><div class="${badgeDotClass}"></div>${escapeHtml(badgeLabel)}</div>
+        <div>
+          <div class="panel-title">${escapeHtml(`${detail.host} · ${describeBatchRole(batchRole, inputs?.agentCount ?? 1)}`)}</div>
+          <div class="panel-sub">${escapeHtml(subtitle)}</div>
+        </div>
+        <div class="panel-actions">
+          <a class="icon-btn" href="/outputs/${encodeURIComponent(detail.id)}" target="_blank" rel="noreferrer">↗ Full output</a>
+          <a class="icon-btn" href="/api/runs/${encodeURIComponent(detail.id)}/artifacts/report.json">↓ JSON output</a>
+        </div>
+      </div>
+      ${warningList}
+      <div class="agents-grid">
+        ${cards
+          .map(
+            (card) => `
+              <article class="agent-card ${card.stateClass} ${card.selected ? "selected" : ""}"${card.runId ? ` data-run-id="${escapeHtml(card.runId)}"` : ""}>
+                <div class="agent-num">
+                  <span>${escapeHtml(card.idLabel)}</span>
+                  <span class="status-pip ${card.pipClass}"></span>
                 </div>
-                <div class="task-meta task-card__meta">
-                  ${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
-                </div>
-                <div class="link-row">
-                  ${
-                    agentRun.runId
-                      ? `
-                          <a class="inline-link" href="/dashboard?run=${encodeURIComponent(agentRun.runId)}">Open agent run</a>
-                          <a class="inline-link" href="/reports/${encodeURIComponent(agentRun.runId)}" target="_blank" rel="noreferrer">Standalone HTML report</a>
-                          <a class="inline-link" href="/api/runs/${encodeURIComponent(agentRun.runId)}/artifacts/report.html">Download HTML</a>
-                          <a class="inline-link" href="/api/runs/${encodeURIComponent(agentRun.runId)}/artifacts/report.json">Download JSON</a>
-                        `
-                      : `<span class="muted">No downloadable report is available for this agent yet.</span>`
-                  }
-                </div>
+                <div class="agent-persona">${escapeHtml(card.persona)}</div>
+                <div class="agent-doing">${escapeHtml(card.summary)}</div>
+                <div class="agent-score ${card.score === null ? "score-muted" : card.score >= 8 ? "score-green" : card.score >= 5 ? "score-amber" : "score-red"}">${escapeHtml(card.score === null ? "..." : `${formatScore(card.score)}/10`)}</div>
+                <div class="prog-track"><div class="prog-fill ${card.progressClass}" style="width:${card.progressWidth}%"></div></div>
               </article>
-            `;
-          })
+            `
+          )
           .join("")}
+      </div>
+      <div style="padding: 0 16px 6px;">
+        <div class="card-title">Live feedback stream</div>
+      </div>
+      <div class="feedback-list">
+        ${
+          feedbackItems.length > 0
+            ? feedbackItems
+                .map(
+                  (item) => `
+                    <article class="fb-item">
+                      <div class="fb-top">
+                        <span class="fb-agent">${escapeHtml(item.source)}</span>
+                        <span class="fb-tag ${item.tagClass}">${escapeHtml(item.tagLabel)}</span>
+                      </div>
+                      <div class="fb-text">${escapeHtml(item.text)}</div>
+                    </article>
+                  `
+                )
+                .join("")
+            : `<div class="warning-note">Feedback will appear here once the run records strengths, issues, or accessibility findings.</div>`
+        }
       </div>
     </section>
   `;
 }
 
-function renderTaskCard(task: DashboardRunDetail["tasks"][number]): string {
-  const finalHref = safeHref(task.finalUrl);
-  const evidenceBlock =
-    task.evidence.length > 0
-      ? `
-          <ul class="evidence-list">
-            ${task.evidence.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-          </ul>
-        `
-      : `<div class="warning-note">The final reviewer did not add evidence bullets for this task, so use the step history below.</div>`;
+function renderListPanel(title: string, items: string[], emptyCopy: string): string {
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">${escapeHtml(title)}</div>
+        </div>
+      </div>
+      <div class="panel-body">
+        ${
+          items.length > 0
+            ? `<ul class="prose-list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+            : `<div class="warning-note">${escapeHtml(emptyCopy)}</div>`
+        }
+      </div>
+    </section>
+  `;
+}
 
-  const historyGrid =
+function renderTaskCard(runId: string, task: DashboardRunDetail["tasks"][number], timeZone: string | null): string {
+  const finalHref = safeHref(task.finalUrl);
+  const historyHtml =
     task.history.length > 0
       ? task.history
           .map((entry) => {
-            const targetLabel = entry.decision.target ? ` <code>${escapeHtml(entry.decision.target)}</code>` : "";
-            const matcher = entry.result.matchedBy ? ` via ${escapeHtml(entry.result.matchedBy)}` : "";
+            const stepHref = safeHref(entry.url);
+            const actionText = getActionDescription(entry.decision.action, entry.decision.target);
+            const beforeScreenshotHref = buildArtifactHref(runId, entry.result.beforeScreenshotPath);
+            const afterScreenshotHref = buildArtifactHref(runId, entry.result.afterScreenshotPath);
 
             return `
               <article class="history-card">
@@ -356,21 +922,64 @@ function renderTaskCard(task: DashboardRunDetail["tasks"][number]): string {
                   <strong>Step ${entry.step}</strong>
                   <span class="pill pill--friction-${escapeHtml(entry.decision.friction)}">${escapeHtml(humanize(entry.decision.friction))} friction</span>
                 </div>
-                <p><strong>${escapeHtml(entry.decision.action)}</strong>${targetLabel}</p>
+                ${
+                  entry.decision.instructionQuote
+                    ? `<p><strong>Page Step${entry.decision.stepNumber ? ` ${escapeHtml(String(entry.decision.stepNumber))}` : ""}:</strong> ${escapeHtml(entry.decision.instructionQuote)}</p>`
+                    : ""
+                }
+                <p><strong>${escapeHtml(actionText)}</strong></p>
                 <p>${escapeHtml(entry.decision.expectation)}</p>
-                <p class="muted">${escapeHtml(entry.result.note)}${matcher}</p>
+                <p>${escapeHtml(entry.result.note)}</p>
                 <div class="history-meta">
                   <span>${escapeHtml(entry.title || "Untitled page")}</span>
-                  <span>${escapeHtml(formatDate(entry.time, state.detail?.inputs?.synchronizedTimezone ?? null))}</span>
+                  <span>${escapeHtml(formatDate(entry.time, timeZone))}</span>
                 </div>
+                ${
+                  beforeScreenshotHref || afterScreenshotHref
+                    ? `
+                      <div class="step-proof">
+                        ${
+                          beforeScreenshotHref
+                            ? `
+                              <figure class="proof-shot">
+                                <a href="${escapeHtml(beforeScreenshotHref)}" target="_blank" rel="noreferrer">
+                                  <img src="${escapeHtml(beforeScreenshotHref)}" alt="${escapeHtml(`Before click screenshot for step ${entry.step}`)}" loading="lazy" />
+                                </a>
+                                <figcaption>Before click</figcaption>
+                              </figure>
+                            `
+                            : ""
+                        }
+                        ${
+                          afterScreenshotHref
+                            ? `
+                              <figure class="proof-shot">
+                                <a href="${escapeHtml(afterScreenshotHref)}" target="_blank" rel="noreferrer">
+                                  <img src="${escapeHtml(afterScreenshotHref)}" alt="${escapeHtml(`After click screenshot for step ${entry.step}`)}" loading="lazy" />
+                                </a>
+                                <figcaption>After click</figcaption>
+                              </figure>
+                            `
+                            : ""
+                        }
+                      </div>
+                    `
+                    : ""
+                }
                 <div class="link-row">
-                  <a class="inline-link" href="${escapeHtml(safeHref(entry.url) ?? "#")}" target="_blank" rel="noreferrer">Open page</a>
+                  ${
+                    stepHref
+                      ? `<a class="inline-link" href="${escapeHtml(stepHref)}" target="_blank" rel="noreferrer">Open page</a>`
+                      : `<span class="muted">No page URL was recorded.</span>`
+                  }
+                  ${beforeScreenshotHref ? `<a class="inline-link" href="${escapeHtml(beforeScreenshotHref)}" target="_blank" rel="noreferrer">Open before-click frame</a>` : ""}
+                  ${afterScreenshotHref ? `<a class="inline-link" href="${escapeHtml(afterScreenshotHref)}" target="_blank" rel="noreferrer">Open after-click frame</a>` : ""}
                 </div>
               </article>
             `;
           })
           .join("")
-      : `<div class="warning-note">No step history was recorded for this task.</div>`;
+      : `<div class="warning-note">No step-by-step history was recorded for this part of the visit.</div>`;
 
   return `
     <article class="task-card">
@@ -381,22 +990,26 @@ function renderTaskCard(task: DashboardRunDetail["tasks"][number]): string {
         </div>
         <span class="pill pill--status-${escapeHtml(task.status)}">${escapeHtml(humanize(task.status))}</span>
       </div>
-      <div class="task-meta task-card__meta">
-        <span>${escapeHtml(`${task.history.length} steps`)}</span>
-        <span>${escapeHtml(task.finalTitle || "No final title recorded")}</span>
+      <div class="task-meta">
+        <span>${escapeHtml(`${task.history.length} steps recorded`)}</span>
+        <span>${escapeHtml(task.finalTitle || "No final page title recorded")}</span>
       </div>
       <div class="link-row">
         ${
           finalHref
             ? `<a class="inline-link" href="${escapeHtml(finalHref)}" target="_blank" rel="noreferrer">Open final URL</a>`
-            : `<span class="muted">No final URL recorded.</span>`
+            : `<span class="muted">No final URL was recorded.</span>`
         }
       </div>
-      ${evidenceBlock}
+      ${
+        task.evidence.length > 0
+          ? `<ul class="evidence-list">${task.evidence.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+          : `<div class="warning-note" style="margin-top: 12px;">No extra evidence bullets were saved for this section.</div>`
+      }
       <details class="task-details">
         <summary>Interaction timeline</summary>
         <div class="history-grid">
-          ${historyGrid}
+          ${historyHtml}
         </div>
       </details>
     </article>
@@ -415,175 +1028,381 @@ function renderAccessibility(detail: DashboardRunDetail): string {
   }
 
   if (accessibility.violations.length === 0) {
-    return `<div class="warning-note">No accessibility violations were recorded in the saved audit artifact.</div>`;
+    return `<div class="warning-note">No accessibility violations were recorded for this run.</div>`;
   }
 
   return `
     <div class="accessibility-grid">
       ${accessibility.violations
-        .map((violation) => `
-          <article class="violation-card">
-            <div class="section-heading">
-              <h3>${escapeHtml(violation.id)}</h3>
-              <span class="pill pill--score-${scoreTone(violation.impact ? 3 : 6)}">${escapeHtml(violation.impact ?? "unknown impact")}</span>
-            </div>
-            <p>${escapeHtml(violation.description)}</p>
-            <p><strong>Help:</strong> ${escapeHtml(violation.help)}</p>
-            <div class="helper-row">
-              <span>${escapeHtml(`${violation.nodes} affected nodes`)}</span>
-            </div>
-          </article>
-        `)
+        .map(
+          (violation) => `
+            <article class="violation-card">
+              <div class="section-heading">
+                <h3>${escapeHtml(violation.id)}</h3>
+                <span class="pill pill--score-${scoreTone(violation.impact ? 3 : 6)}">${escapeHtml(violation.impact ?? "unknown impact")}</span>
+              </div>
+              <p>${escapeHtml(violation.description)}</p>
+              <p><strong>Help:</strong> ${escapeHtml(violation.help)}</p>
+              <div class="helper-row">
+                <span>${escapeHtml(`${violation.nodes} affected ${violation.nodes === 1 ? "node" : "nodes"}`)}</span>
+              </div>
+            </article>
+          `
+        )
         .join("")}
     </div>
   `;
 }
 
-function renderMain(): string {
-  if (state.loadingRuns && state.runs.length === 0) {
-    return `<section class="panel empty-stack"><div><h2>Loading dashboard</h2><p class="muted">Reading saved run artifacts.</p></div></section>`;
-  }
-
-  if (state.runs.length === 0) {
-    return `
-      <section class="panel empty-stack">
-        <div>
-          <h2>No reports yet</h2>
-          <p class="muted">Run the CLI first, then refresh this dashboard.</p>
-          <p class="muted"><code>npm run dev -- --url https://example.com</code></p>
-        </div>
-      </section>
-    `;
-  }
-
-  if (state.loadingDetail && !state.detail) {
-    return `<section class="panel empty-stack"><div><h2>Loading run</h2><p class="muted">Pulling report details, tasks, and logs.</p></div></section>`;
-  }
-
-  if (!state.detail) {
-    return `<section class="panel empty-stack"><div><h2>Select a run</h2><p class="muted">Choose a saved run from the left to inspect the report.</p></div></section>`;
-  }
-
-  const detail = state.detail;
+function renderSummaryRail(detail: DashboardRunDetail): string {
   const report = detail.report;
-  const inputs = detail.inputs;
-  const summary = report?.summary ?? "This run has saved artifacts, but no final report summary was available.";
+  const issues = buildIssueItems(detail);
+  const personas = buildPersonaChips(detail);
+  const activityItems = buildActivityItems(detail);
   const overallScore = report?.overall_score ?? null;
-  const batchRole = inputs?.batchRole ?? "single";
-  const metaPills = [
-    describeBatchRole(batchRole, inputs?.agentCount ?? 1),
-    inputs?.persona ?? "Unknown persona",
-    batchRole === "aggregate" ? `${inputs?.completedAgentCount ?? 0}/${inputs?.agentCount ?? 1} completed` : null,
-    batchRole === "aggregate" && (inputs?.failedAgentCount ?? 0) > 0 ? `${inputs?.failedAgentCount ?? 0} failed` : null,
-    batchRole === "child" ? inputs?.agentLabel ?? "Agent run" : null,
-    batchRole === "child" ? inputs?.agentProfileLabel ?? null : null,
-    inputs?.mobile ? "Mobile run" : "Desktop run",
+  const summaryToggleLabel = state.summaryRailCollapsed ? "Open" : "Hide";
+  const summaryToggleAriaLabel = state.summaryRailCollapsed ? "Expand run summary" : "Collapse run summary";
+  const summaryToggleIcon = state.summaryRailCollapsed ? "▸" : "◂";
+  const summaryTitle = state.summaryRailCollapsed ? "Summary" : "Run summary";
+
+  return `
+    <aside class="panel summary-rail ${state.summaryRailCollapsed ? "summary-rail--collapsed" : ""}" data-summary-rail>
+      <div class="panel-head">
+        <div class="panel-title">${escapeHtml(summaryTitle)}</div>
+        <div class="panel-actions">
+          <a class="icon-btn" data-summary-share href="/outputs/${encodeURIComponent(detail.id)}" target="_blank" rel="noreferrer">⎘ Share output</a>
+          <button class="icon-btn summary-toggle" type="button" data-summary-toggle aria-expanded="${state.summaryRailCollapsed ? "false" : "true"}" aria-label="${escapeHtml(summaryToggleAriaLabel)}">
+            <span aria-hidden="true">${summaryToggleIcon}</span>
+            <span class="summary-toggle-label">${escapeHtml(summaryToggleLabel)}</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="summary-rail-body">
+        <div class="summary-section">
+          <div class="ss-label">Overall score</div>
+          <div class="big-score">${escapeHtml(formatScore(overallScore))}<span class="score-dim">/10</span></div>
+          ${
+            report
+              ? `
+                <div class="score-bars">
+                  ${Object.entries(report.scores)
+                    .map(([label, value]) => `
+                      <div class="sb-row">
+                        <span class="sb-name">${escapeHtml(humanize(label))}</span>
+                        <div class="sb-track"><div class="sb-fill ${value >= 8 ? "prog-green" : value >= 5 ? "prog-blue" : "prog-amber"}" style="width:${clamp(value * 10, 10, 100)}%"></div></div>
+                        <span class="sb-val" style="color:${value >= 8 ? "var(--accent)" : value >= 5 ? "var(--blue)" : "var(--amber)"}">${value}</span>
+                      </div>
+                    `)
+                    .join("")}
+                </div>
+              `
+              : `<div class="warning-note" style="margin-top: 12px;">This run does not have a saved score breakdown yet.</div>`
+          }
+        </div>
+
+        <div class="summary-section">
+          <div class="ss-label">Top issues</div>
+          <div class="issue-list">
+            ${issues
+              .map(
+                (issue) => `
+                  <div class="issue-row">
+                    <div class="issue-icon ${issue.iconClass}">${escapeHtml(issue.iconLabel)}</div>
+                    <span class="issue-text">${escapeHtml(issue.text)}</span>
+                    <span class="issue-cnt">${escapeHtml(issue.countLabel)}</span>
+                  </div>
+                `
+              )
+              .join("")}
+          </div>
+        </div>
+
+        <div class="summary-section">
+          <div class="ss-label">Personas</div>
+          <div class="persona-chips">
+            ${personas.map((persona) => `<span class="p-chip">${escapeHtml(persona)}</span>`).join("")}
+          </div>
+        </div>
+
+        <div class="summary-section">
+          <div class="ss-label">Activity</div>
+          <div class="activity-log">
+            ${activityItems
+              .map(
+                (item) => `
+                  <div class="al-row">
+                    <span class="al-time">${escapeHtml(item.time)}</span>
+                    <span class="al-text">${item.idLabel ? `<span class="al-id">${escapeHtml(item.idLabel)}</span> ` : ""}${escapeHtml(item.text)}</span>
+                  </div>
+                `
+              )
+              .join("")}
+          </div>
+        </div>
+      </div>
+    </aside>
+  `;
+}
+
+function renderRunMetaPanel(detail: DashboardRunDetail): string {
+  const inputs = detail.inputs;
+  const hasClickFrames = detail.tasks.some((task) =>
+    task.history.some((entry) => entry.result.beforeScreenshotPath || entry.result.afterScreenshotPath)
+  );
+  const clickReplayHref = buildArtifactHref(detail.id, inputs?.clickReplayArtifact);
+  const metaItems = [
+    describeBatchRole(inputs?.batchRole ?? "single", inputs?.agentCount ?? 1),
+    inputs?.mobile ? "Mobile-sized run" : "Desktop-sized run",
     inputs?.headed ? "Headed browser" : "Headless browser",
-    inputs?.ignoreHttpsErrors ? "Ignoring HTTPS errors" : "Strict HTTPS checks",
-    inputs?.model ? `Model: ${inputs.model}` : "Model unknown",
-    inputs?.synchronizedTimezone ? `Timezone: ${inputs.synchronizedTimezone}` : null,
-    inputs?.maxRunDurationSeconds ? `Max total run: ${inputs.maxRunDurationSeconds}s` : null,
-    inputs?.browserExecutionBudgetMs ? `Browser budget: ${Math.round(inputs.browserExecutionBudgetMs / 1000)}s` : null,
-    inputs?.reportingReserveMs ? `Report reserve: ${Math.round(inputs.reportingReserveMs / 1000)}s` : null,
+    inputs?.model ? `Model ${inputs.model}` : null,
+    inputs?.synchronizedTimezone ? `Timezone ${inputs.synchronizedTimezone}` : null,
     `${detail.rawEventCount} raw events`
   ].filter((item): item is string => Boolean(item));
 
   return `
-    <section class="panel hero-panel">
-      <div class="hero-grid">
+    <section class="panel">
+      <div class="panel-head">
         <div>
-          <p class="eyebrow">${escapeHtml(describeBatchRole(batchRole, inputs?.agentCount ?? 1))}</p>
-          <h2>${escapeHtml(detail.host)}</h2>
-          <p class="hero-summary">${escapeHtml(summary)}</p>
-          <div class="helper-row">
-            <span>${escapeHtml(inputs?.baseUrl ?? "Unknown URL")}</span>
-            <span>${escapeHtml(formatDate(inputs?.startedAt, inputs?.synchronizedTimezone ?? null))}</span>
-            ${metaPills.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+          <div class="panel-title">Run details</div>
+          <div class="panel-sub">The context behind this saved visit</div>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="helper-row" style="margin-top: 0;">
+          ${metaItems.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+        </div>
+        ${
+          inputs?.siteBrief?.summary
+            ? `<div class="warning-note" style="margin-top: 12px;"><strong>Site brief.</strong> ${escapeHtml(inputs.siteBrief.summary)}</div>`
+            : ""
+        }
+        ${
+          inputs?.instructionText
+            ? `<div class="warning-note" style="margin-top: 12px; white-space: pre-wrap;"><strong>Instruction source.</strong>\n${escapeHtml(inputs.instructionText)}</div>`
+            : ""
+        }
+        ${
+          hasClickFrames
+            ? `<div class="warning-note" style="margin-top: 12px;"><strong>Playwright click frames.</strong> The before/after images in the interaction timeline were captured from the isolated Playwright browser session for this run.</div>`
+            : ""
+        }
+        ${renderClickReplayStatus(detail, hasClickFrames)}
+        <div class="link-row">
+          <a class="inline-link" href="/outputs/${encodeURIComponent(detail.id)}" target="_blank" rel="noreferrer">Open standalone HTML output</a>
+          <a class="inline-link" href="/api/runs/${encodeURIComponent(detail.id)}/artifacts/report.html">Download HTML output</a>
+          <a class="inline-link" href="/api/runs/${encodeURIComponent(detail.id)}/artifacts/report.json">Download JSON output</a>
+          ${clickReplayHref ? `<a class="inline-link" href="${escapeHtml(clickReplayHref)}" target="_blank" rel="noreferrer">Open click replay</a>` : ""}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderDetailContent(detail: DashboardRunDetail): string {
+  const recapParagraphs = buildVisitRecap(detail);
+  const strengths = filterVisitorFacingItems(detail.report?.strengths ?? []);
+  const weaknesses = filterVisitorFacingItems(detail.report?.weaknesses ?? []);
+  const topFixes = filterVisitorFacingItems(detail.report?.top_fixes ?? []);
+  const timezone = detail.inputs?.synchronizedTimezone ?? null;
+
+  return `
+    <div class="two-col ${state.summaryRailCollapsed ? "summary-rail-collapsed" : ""}" data-summary-layout>
+      <div class="stack">
+        ${renderAgentGrid(detail)}
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">How I’d Describe This Visit To A Friend</div>
+              <div class="panel-sub">Built from recorded clicks, pages, and accepted-task outcomes</div>
+            </div>
           </div>
-          <div class="link-row">
-            <a class="inline-link" href="/reports/${encodeURIComponent(detail.id)}" target="_blank" rel="noreferrer">Open standalone HTML report</a>
-            <a class="inline-link" href="/api/runs/${encodeURIComponent(detail.id)}/artifacts/report.html">Download HTML report</a>
-            <a class="inline-link" href="/api/runs/${encodeURIComponent(detail.id)}/artifacts/report.json">Download JSON report</a>
+          <div class="panel-body">
+            <div class="visit-recap">
+              ${recapParagraphs.map((paragraph) => `<p class="visit-recap__line">${escapeHtml(paragraph)}</p>`).join("")}
+            </div>
           </div>
-          ${
-            state.error
-              ? `<p class="warning-note">${escapeHtml(state.error)}</p>`
-              : ""
-          }
+        </section>
+
+        <div class="list-grid">
+          ${renderListPanel("What felt solid", strengths, "I did not record any standout positives in this run.")}
+          ${renderListPanel("Where the visit broke down", weaknesses, "This visit was smoother than expected.")}
+          ${renderListPanel("What I would fix first", topFixes, "No top-priority fixes were recorded for this run.")}
         </div>
-        <div class="hero-score">
-          <strong>${overallScore === null ? "n/a" : overallScore}</strong>
-          <span>overall score / 10</span>
+
+        ${renderRunMetaPanel(detail)}
+
+        <section class="panel" id="output-details">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">Interaction breakdown</div>
+              <div class="panel-sub">Each part of the visit, with the recorded step history underneath</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="task-stack">
+              ${
+                detail.tasks.length > 0
+                  ? detail.tasks.map((task) => renderTaskCard(detail.id, task, timezone)).join("")
+                  : `<div class="warning-note">No task breakdown was recorded for this run.</div>`
+              }
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">Accessibility findings</div>
+              <div class="panel-sub">Saved axe results from the same run</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            ${renderAccessibility(detail)}
+          </div>
+        </section>
+      </div>
+
+      ${renderSummaryRail(detail)}
+    </div>
+  `;
+}
+
+function renderEmptyState(): string {
+  if (state.loadingRuns && state.runs.length === 0) {
+    return `
+      <div class="two-col">
+        <div class="stack">
+          <section class="panel empty-stack">
+            <div>
+              <h2>Loading dashboard</h2>
+              <p class="muted">Reading saved run artifacts and building the dashboard view.</p>
+            </div>
+          </section>
+        </div>
+        <aside class="panel">
+          <div class="summary-section">
+            <div class="ss-label">Run summary</div>
+            <div class="warning-note">A saved run needs to finish loading before the summary rail can populate.</div>
+          </div>
+        </aside>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="two-col">
+      <div class="stack">
+        <section class="panel empty-stack">
+          <div>
+            <h2>No outputs yet</h2>
+            <p class="muted">Start a new task run from the home page and the finished run will appear here automatically.</p>
+            <p class="muted"><code>npm run dev -- --url https://example.com</code></p>
+          </div>
+        </section>
+      </div>
+      <aside class="panel">
+        <div class="summary-section">
+          <div class="ss-label">Run summary</div>
+          <div class="warning-note">Pick or create a run to see the score, issues, personas, and activity rail.</div>
+        </div>
+      </aside>
+    </div>
+  `;
+}
+
+function renderMain(): string {
+  const detail = state.detail;
+  const topbarDate = detail?.inputs?.startedAt ?? state.runs[0]?.startedAt ?? null;
+  const exportHref = detail ? `/api/runs/${encodeURIComponent(detail.id)}/artifacts/report.html` : null;
+  const sidebarToggleLabel = state.sidebarCollapsed ? "Show nav" : "Hide nav";
+  const sidebarToggleIcon = state.sidebarCollapsed ? "▸" : "◂";
+
+  return `
+    <div class="topbar">
+      <div class="topbar-left">
+        <button class="btn btn-ghost sidebar-toggle" type="button" data-sidebar-toggle aria-expanded="${state.sidebarCollapsed ? "false" : "true"}" aria-label="${escapeHtml(sidebarToggleLabel)}">
+          <span aria-hidden="true">${sidebarToggleIcon}</span>
+          <span class="sidebar-toggle-label">${escapeHtml(sidebarToggleLabel)}</span>
+        </button>
+        <div>
+          <span class="page-title">Dashboard</span>
+          <span class="page-sub">— ${escapeHtml(formatDashboardDate(topbarDate))}</span>
         </div>
       </div>
-      ${
-        detail.warnings.length > 0
-          ? `<p class="warning-note">${escapeHtml(detail.warnings.join(" "))}</p>`
-          : ""
-      }
-    </section>
-
-    <section class="score-grid">
-      ${renderScoreCards(detail)}
-    </section>
-
-    <section class="list-grid">
-      ${renderList("Strengths", report?.strengths ?? [], "No strengths were recorded for this run.")}
-      ${renderList("Weaknesses", report?.weaknesses ?? [], "No weaknesses were recorded for this run.")}
-      ${renderList("Top fixes", report?.top_fixes ?? [], "No top fixes were recorded for this run.")}
-      <div class="panel">
-        <div class="section-heading">
-          <h3>Run details</h3>
-          <span class="muted">${escapeHtml(`${detail.tasks.length} tasks`)}</span>
-        </div>
-        <div class="helper-row" style="margin-top: 1rem;">
-          <span>${escapeHtml(describeBatchRole(batchRole, inputs?.agentCount ?? 1))}</span>
-          <span>${escapeHtml(inputs?.taskPath ?? "Task path unavailable")}</span>
-          <span>${escapeHtml(`${detail.accessibility?.violations.length ?? 0} accessibility findings`)}</span>
-          <span>${escapeHtml(currentRunIdFromUrl() ?? detail.id)}</span>
-        </div>
+      <div class="topbar-right">
+        ${
+          exportHref
+            ? `<a class="btn btn-ghost" href="${escapeHtml(exportHref)}">↓ Export</a>`
+            : `<span class="btn btn-ghost">↓ Export</span>`
+        }
+        <a class="btn btn-primary" href="/">▶ New test run</a>
       </div>
-    </section>
+    </div>
 
-    ${renderAgentPerspectivePanel(detail)}
-
-    <section class="panel">
-      <div class="section-heading">
-        <h3>Task deep dive</h3>
-        <span class="muted">Review the recorded interaction timeline</span>
-      </div>
-      <div class="task-stack">
-        ${detail.tasks.map((task) => renderTaskCard(task)).join("")}
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="section-heading">
-        <h3>Accessibility</h3>
-        <span class="muted">Saved axe results</span>
-      </div>
-      ${renderAccessibility(detail)}
-    </section>
+    <div class="content">
+      ${renderMetricsGrid(detail)}
+      ${state.error ? `<div class="warning-note">${escapeHtml(state.error)}</div>` : ""}
+      ${detail ? renderDetailContent(detail) : renderEmptyState()}
+    </div>
   `;
 }
 
 function render(): void {
   dashboardRoot.innerHTML = `
-    <div class="app-shell">
-      <aside class="sidebar">
-        <div class="brand-block">
-          <p class="eyebrow">Site Agent Pro</p>
-          <h1>Run Dashboard</h1>
-          <p class="sidebar-copy">Browse saved audits, inspect evidence, and review the interaction log without digging through the filesystem.</p>
-          <div class="mini-meta">
-            <span>${escapeHtml(`${state.runs.length} saved runs`)}</span>
-            <span>${state.loadingRuns ? "Refreshing" : "Artifacts from runs/"}</span>
+    <div class="app ${state.sidebarCollapsed ? "sidebar-collapsed" : ""}">
+      <nav class="sidebar">
+        <div class="logo">
+          <div class="logo-mark"></div>
+          <div>
+            <div class="logo-name">agentprobe</div>
+          </div>
+          <span class="logo-beta">β</span>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-label">Main</div>
+          <a class="nav-item active" href="/dashboard">
+            <span class="nav-icon">◈</span> Dashboard
+          </a>
+          <a class="nav-item" href="/">
+            <span class="nav-icon">⊡</span> New test
+            <span class="nav-badge">${escapeHtml(`${state.runs.length}`)}</span>
+          </a>
+          <a class="nav-item" href="#output-details">
+            <span class="nav-icon">◫</span> Outputs
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-label">Config</div>
+          <a class="nav-item" href="#live-run">
+            <span class="nav-icon">◉</span> Live run
+          </a>
+          <a class="nav-item" href="#saved-runs">
+            <span class="nav-icon">◎</span> Saved runs
+          </a>
+        </div>
+
+        <div class="nav-section run-list-shell" id="saved-runs">
+          <div class="nav-label">Saved runs</div>
+          <div class="run-list">
+            ${renderRunList()}
           </div>
         </div>
-        <div class="run-list">
-          ${renderRunList()}
+
+        <div class="sidebar-footer">
+          <div class="workspace">
+            <div class="ws-avatar">AP</div>
+            <div>
+              <div class="ws-name">AgentProbe Workspace</div>
+              <div class="ws-plan">${escapeHtml(`${state.runs.length} saved ${state.runs.length === 1 ? "run" : "runs"}`)}</div>
+            </div>
+          </div>
         </div>
-      </aside>
+      </nav>
+
       <main class="main">
         ${renderMain()}
       </main>
@@ -597,13 +1416,28 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  const sidebarToggle = target.closest<HTMLElement>("[data-sidebar-toggle]");
+  if (sidebarToggle) {
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    writeSidebarCollapsedPreference(state.sidebarCollapsed);
+    render();
+    return;
+  }
+
+  const summaryToggle = target.closest<HTMLElement>("[data-summary-toggle]");
+  if (summaryToggle) {
+    state.summaryRailCollapsed = !state.summaryRailCollapsed;
+    writeSummaryRailCollapsedPreference(state.summaryRailCollapsed);
+    render();
+    return;
+  }
+
   const runButton = target.closest<HTMLElement>("[data-run-id]");
   if (runButton) {
     const runId = runButton.dataset.runId;
     if (runId && runId !== state.selectedRunId) {
       void loadRunDetail(runId, true);
     }
-    return;
   }
 });
 

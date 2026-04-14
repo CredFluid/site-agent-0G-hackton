@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { config } from "../config.js";
 import { type Submission, SubmissionSchema, type SubmissionAgentRun } from "./types.js";
 import { buildInitialAgentRuns } from "../core/agentProfiles.js";
+import { buildCustomTaskSuite } from "../core/customTaskSuite.js";
+import { normalizeCustomTasks, SUBMISSION_TASKS_REQUIRED_MESSAGE } from "./customTasks.js";
 
 export function computeExpiresAt(createdAt: string): string {
   const createdMs = new Date(createdAt).getTime();
@@ -14,19 +16,26 @@ export function isExpired(expiresAt: string, now = Date.now()): boolean {
 
 export function createSubmissionRecord(args: {
   url: string;
-  taskPath?: string;
   headed?: boolean;
   mobile?: boolean;
   ignoreHttpsErrors?: boolean;
   agentCount?: number;
   agentRuns?: SubmissionAgentRun[];
+  customTasks?: string[];
+  instructionText?: string;
+  instructionFileName?: string | null;
 }): Submission {
   const createdAt = new Date().toISOString();
   const id = crypto.randomUUID();
   const reportToken = crypto.randomBytes(18).toString("base64url");
-  const taskPath = args.taskPath ?? "src/tasks/generic_interaction.json";
   const agentCount = Math.min(5, Math.max(1, Math.round(args.agentCount ?? args.agentRuns?.length ?? 1)));
-  const agentRuns = args.agentRuns ?? buildInitialAgentRuns(taskPath, agentCount);
+  const customTasks = normalizeCustomTasks(args.customTasks ?? []);
+  if (customTasks.length === 0) {
+    throw new Error(SUBMISSION_TASKS_REQUIRED_MESSAGE);
+  }
+
+  const customSuite = buildCustomTaskSuite(customTasks);
+  const agentRuns = args.agentRuns ?? buildInitialAgentRuns(agentCount, customSuite);
 
   return SubmissionSchema.parse({
     id,
@@ -38,10 +47,12 @@ export function createSubmissionRecord(args: {
     status: "queued",
     reportToken,
     publicReportPath: `/r/${reportToken}`,
-    taskPath,
     headed: Boolean(args.headed),
     mobile: Boolean(args.mobile),
     ignoreHttpsErrors: Boolean(args.ignoreHttpsErrors),
+    customTasks,
+    instructionText: args.instructionText?.trim() || customTasks.join("\n"),
+    instructionFileName: args.instructionFileName?.trim() || null,
     agentCount,
     completedAgentCount: 0,
     failedAgentCount: 0,

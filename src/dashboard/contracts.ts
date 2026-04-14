@@ -2,6 +2,8 @@ import { z } from "zod";
 import {
   AccessibilityResultSchema,
   FinalReportSchema,
+  SiteBriefSchema,
+  SiteChecksSchema,
   TaskHistoryEntrySchema
 } from "../schemas/types.js";
 import { SubmissionAgentRunSchema } from "../submissions/types.js";
@@ -20,7 +22,6 @@ const TenPointNullableScoreSchema = z
 
 export const RunInputsSchema = z.object({
   baseUrl: z.string(),
-  taskPath: z.string(),
   persona: z.string().optional(),
   headed: z.boolean(),
   mobile: z.boolean(),
@@ -35,11 +36,18 @@ export const RunInputsSchema = z.object({
   deviceTimezone: z.string().optional(),
   browserTimezone: z.string().optional(),
   synchronizedTimezone: z.string().optional(),
+  clickReplayArtifact: z.string().optional(),
+  clickReplayFrameCount: z.number().int().positive().optional(),
+  clickReplayDurationMs: z.number().int().positive().optional(),
+  instructionText: z.string().optional(),
+  instructionFileName: z.string().nullable().optional(),
+  siteBrief: SiteBriefSchema.optional(),
   batchRole: z.enum(["single", "child", "aggregate"]).default("single"),
   parentSubmissionId: z.string().optional(),
   agentCount: z.number().int().min(1).max(5).default(1),
   completedAgentCount: z.number().int().nonnegative().default(0),
   failedAgentCount: z.number().int().nonnegative().default(0),
+  customTasks: z.array(z.string()).default([]),
   agentIndex: z.number().int().min(1).max(5).optional(),
   agentLabel: z.string().optional(),
   agentProfileLabel: z.string().optional(),
@@ -56,7 +64,6 @@ export const DashboardRunSummarySchema = z.object({
   headed: z.boolean(),
   mobile: z.boolean(),
   model: z.string().nullable(),
-  taskPath: z.string().nullable(),
   persona: z.string().nullable(),
   overallScore: TenPointNullableScoreSchema,
   summary: z.string().nullable(),
@@ -89,6 +96,7 @@ export const DashboardRunDetailSchema = z.object({
   inputs: RunInputsSchema.nullable(),
   report: FinalReportSchema.nullable(),
   accessibility: AccessibilityResultSchema.nullable(),
+  siteChecks: SiteChecksSchema.nullable(),
   tasks: z.array(DashboardTaskSchema),
   rawEventCount: z.number().int().nonnegative(),
   warnings: z.array(z.string())

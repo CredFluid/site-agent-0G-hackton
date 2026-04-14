@@ -1,3 +1,4 @@
+import { artifactContentType, isAllowedDashboardArtifact, isImageArtifact } from "../backend/runArtifacts.js";
 import {
   buildRunDetail,
   buildRunSummary,
@@ -8,6 +9,7 @@ import {
 import {
   findSubmissionByReportToken,
   listRunIds,
+  readRunArtifactBinary,
   readRunArtifactText,
   readSubmission,
   writeSubmission
@@ -16,12 +18,24 @@ import { renderExpiredReportPage, renderLandingPage, renderReportUnavailablePage
 import { validatePublicUrl } from "../submissions/publicUrl.js";
 import { createSubmissionRecord } from "../submissions/model.js";
 import { config } from "../config.js";
+import { readSubmittedInstructionSource, SUBMISSION_TASKS_REQUIRED_MESSAGE } from "../submissions/customTasks.js";
 
 function respondText(body: string, init: ResponseInit & { contentType: string }): Response {
   return new Response(body, {
     ...init,
     headers: {
       "content-type": `${init.contentType}; charset=utf-8`,
+      "cache-control": "no-store",
+      ...(init.headers ?? {})
+    }
+  });
+}
+
+function respondBinary(body: ArrayBuffer, init: ResponseInit & { contentType: string }): Response {
+  return new Response(body, {
+    ...init,
+    headers: {
+      "content-type": init.contentType,
       "cache-control": "no-store",
       ...(init.headers ?? {})
     }
@@ -69,23 +83,27 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
   }
 
   if (req.method === "POST" && requestUrl.pathname === "/submit") {
-    const form = new URLSearchParams(await req.text());
-    const urlInput = form.get("url") ?? "";
-    const requestedMode = form.get("mode") === "structured" ? "structured" : "generic";
+    const form = await req.formData();
+    const urlInput = typeof form.get("url") === "string" ? (form.get("url") as string) : "";
+    const submittedInstructions = await readSubmittedInstructionSource(form);
     const requestedAgentCount = Number(form.get("agents") ?? "1");
     const normalizedAgentCount = Number.isFinite(requestedAgentCount)
       ? Math.min(5, Math.max(1, Math.round(requestedAgentCount)))
       : 1;
-    const taskPath = requestedMode === "structured" ? "src/tasks/first_time_buyer.json" : "src/tasks/generic_interaction.json";
     const urlValidation = validatePublicUrl(urlInput);
+    const submissionError = !urlValidation.valid
+      ? urlValidation.reason ?? "Enter a valid public URL."
+      : submittedInstructions.customTasks.length === 0
+        ? SUBMISSION_TASKS_REQUIRED_MESSAGE
+        : null;
 
-    if (!urlValidation.valid) {
+    if (submissionError) {
       return respondText(
         renderLandingPage({
-          error: urlValidation.reason ?? "Enter a valid public URL.",
+          error: submissionError,
           submittedUrl: urlInput,
-          selectedMode: requestedMode,
-          selectedAgentCount: normalizedAgentCount
+          selectedAgentCount: normalizedAgentCount,
+          submittedInstructions: submittedInstructions.instructionText
         }),
         { status: 400, contentType: "text/html" }
       );
@@ -93,8 +111,10 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
 
     const submission = createSubmissionRecord({
       url: urlValidation.normalizedUrl ?? urlInput.trim(),
-      taskPath,
-      agentCount: normalizedAgentCount
+      agentCount: normalizedAgentCount,
+      customTasks: submittedInstructions.customTasks,
+      instructionText: submittedInstructions.instructionText,
+      instructionFileName: submittedInstructions.instructionFileName
     });
 
     await writeSubmission(submission);
@@ -162,8 +182,8 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
     if (!submission) {
       return respondText(
         renderReportUnavailablePage({
-          title: "Report not found",
-          message: "This report link does not exist."
+          title: "Task output not found",
+          message: "This task output link does not exist."
         }),
         { status: 404, contentType: "text/html" }
       );
@@ -172,13 +192,13 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
     const access = canAccessPublicReport(submission);
     if (!access.allowed) {
       const html =
-        access.reason === "This report link has expired."
+        access.reason === "This task output link has expired."
           ? renderExpiredReportPage(submission)
           : renderReportUnavailablePage({
-              title: "Report not ready",
-              message: access.reason ?? "This report is not ready yet."
+              title: "Task output not ready",
+              message: access.reason ?? "This task output is not ready yet."
             });
-      const statusCode = access.reason === "This report link has expired." ? 410 : 202;
+      const statusCode = access.reason === "This task output link has expired." ? 410 : 202;
       return respondText(html, { status: statusCode, contentType: "text/html" });
     }
 
@@ -186,8 +206,8 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
     if (!htmlReport) {
       return respondText(
         renderReportUnavailablePage({
-          title: "Report not found",
-          message: "The report artifact could not be loaded."
+          title: "Task output not found",
+          message: "The task output artifact could not be loaded."
         }),
         { status: 404, contentType: "text/html" }
       );
@@ -196,11 +216,11 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
     return respondText(htmlReport, { status: 200, contentType: "text/html" });
   }
 
-  if (pathParts[0] === "reports" && pathParts[1] && pathParts.length === 2) {
+  if ((pathParts[0] === "reports" || pathParts[0] === "outputs") && pathParts[1] && pathParts.length === 2) {
     const runId = decodeURIComponent(pathParts[1]);
     const htmlReport = await buildStandaloneReportHtml(runId);
     if (!htmlReport) {
-      return respondText("Report not found", { status: 404, contentType: "text/plain" });
+      return respondText("Task output not found", { status: 404, contentType: "text/plain" });
     }
 
     return respondText(htmlReport, { status: 200, contentType: "text/html" });
@@ -226,8 +246,23 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
 
     if (pathParts.length === 5 && pathParts[3] === "artifacts" && pathParts[4]) {
       const fileName = decodeURIComponent(pathParts[4]);
-      if (!["report.html", "report.json", "report.md"].includes(fileName)) {
+      if (!isAllowedDashboardArtifact(fileName)) {
         return respondJson({ error: "Artifact not available for download." }, 400);
+      }
+
+      if (isImageArtifact(fileName)) {
+        const artifact = await readRunArtifactBinary(runId, fileName);
+        if (!artifact) {
+          return respondJson({ error: `Artifact '${fileName}' not found.` }, 404);
+        }
+
+        return respondBinary(
+          Uint8Array.from(artifact).buffer,
+          {
+            status: 200,
+            contentType: artifactContentType(fileName)
+          }
+        );
       }
 
       if (fileName === "report.html") {

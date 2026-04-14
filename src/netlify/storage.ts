@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { getStore } from "@netlify/blobs";
 import { z } from "zod";
+import { createRunRepository, type RunRepository } from "../backend/runRepository.js";
+import { isImageArtifact, isSafeRunFileName } from "../backend/runArtifacts.js";
 import { SubmissionSchema, type Submission } from "../submissions/types.js";
 import { readUtf8, resolveRunsDir, resolveSubmissionsDir, writeJson } from "../utils/files.js";
 
@@ -10,22 +12,28 @@ export const RUN_ARTIFACT_NAMES = [
   "raw-events.json",
   "task-results.json",
   "accessibility.json",
+  "site-checks.json",
   "report.json",
   "report.html",
-  "report.md"
+  "report.md",
+  "click-replay.webp"
 ] as const;
 
-export type RunArtifactName = (typeof RUN_ARTIFACT_NAMES)[number];
+export type RunArtifactName = string;
 
 const RUNS_INDEX_KEY = "runs/index.json";
 const STORE_NAME = "site-agent-pro";
-const JSON_RUN_ARTIFACTS = new Set<RunArtifactName>([
+const JSON_RUN_ARTIFACTS = new Set<string>([
   "inputs.json",
   "raw-events.json",
   "task-results.json",
   "accessibility.json",
+  "site-checks.json",
   "report.json"
 ]);
+
+const TEXT_RUN_ARTIFACTS = new Set<string>(["report.html", "report.md"]);
+const BINARY_RUN_ARTIFACTS = new Set<string>(["click-replay.webp"]);
 
 function shouldUseBlobStorage(): boolean {
   return process.env.NETLIFY === "true" || process.env.NETLIFY_LOCAL === "true";
@@ -49,6 +57,34 @@ function localSubmissionPath(id: string): string {
 
 function localRunArtifactPath(runId: string, fileName: RunArtifactName): string {
   return path.join(resolveRunsDir(), runId, fileName);
+}
+
+function isSafeRunId(runId: string): boolean {
+  return isSafeRunFileName(runId);
+}
+
+function isJsonArtifact(fileName: string): boolean {
+  return JSON_RUN_ARTIFACTS.has(fileName);
+}
+
+function isTextArtifact(fileName: string): boolean {
+  return TEXT_RUN_ARTIFACTS.has(fileName);
+}
+
+function isBinaryArtifact(fileName: string): boolean {
+  return BINARY_RUN_ARTIFACTS.has(fileName) || isImageArtifact(fileName);
+}
+
+function listLocalRunArtifactNames(runDir: string): string[] {
+  if (!fs.existsSync(runDir)) {
+    return [];
+  }
+
+  return fs
+    .readdirSync(runDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && isSafeRunFileName(entry.name))
+    .map((entry) => entry.name)
+    .sort((left, right) => left.localeCompare(right));
 }
 
 async function readRunIndexFromBlobs(): Promise<string[]> {
@@ -159,18 +195,36 @@ export async function uploadRunArtifacts(runId: string, runDir: string): Promise
   if (shouldUseBlobStorage()) {
     const store = getBlobStore();
 
-    for (const fileName of RUN_ARTIFACT_NAMES) {
+    for (const fileName of listLocalRunArtifactNames(runDir)) {
       const artifactPath = path.join(runDir, fileName);
       if (!fs.existsSync(artifactPath) || !fs.statSync(artifactPath).isFile()) {
         continue;
       }
 
-      if (JSON_RUN_ARTIFACTS.has(fileName)) {
+      if (isJsonArtifact(fileName)) {
         await store.setJSON(runArtifactKey(runId, fileName), JSON.parse(readUtf8(artifactPath)));
         continue;
       }
 
-      await store.set(runArtifactKey(runId, fileName), readUtf8(artifactPath));
+      if (isBinaryArtifact(fileName)) {
+        const bytes = fs.readFileSync(artifactPath);
+        await store.set(
+          runArtifactKey(runId, fileName),
+          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+        );
+        continue;
+      }
+
+      if (isTextArtifact(fileName)) {
+        await store.set(runArtifactKey(runId, fileName), readUtf8(artifactPath));
+        continue;
+      }
+
+      const bytes = fs.readFileSync(artifactPath);
+      await store.set(
+        runArtifactKey(runId, fileName),
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      );
     }
 
     await recordRunId(runId);
@@ -181,6 +235,10 @@ export async function uploadRunArtifacts(runId: string, runDir: string): Promise
 }
 
 export async function readRunArtifactText(runId: string, fileName: RunArtifactName): Promise<string | null> {
+  if (!isSafeRunId(runId) || !isSafeRunFileName(fileName)) {
+    return null;
+  }
+
   if (shouldUseBlobStorage()) {
     const store = getBlobStore();
     return await store.get(runArtifactKey(runId, fileName), { type: "text" });
@@ -194,7 +252,30 @@ export async function readRunArtifactText(runId: string, fileName: RunArtifactNa
   return readUtf8(artifactPath);
 }
 
+export async function readRunArtifactBinary(runId: string, fileName: RunArtifactName): Promise<Buffer | null> {
+  if (!isSafeRunId(runId) || !isSafeRunFileName(fileName)) {
+    return null;
+  }
+
+  if (shouldUseBlobStorage()) {
+    const store = getBlobStore();
+    const raw = await store.get(runArtifactKey(runId, fileName), { type: "arrayBuffer" });
+    return raw === null ? null : Buffer.from(raw);
+  }
+
+  const artifactPath = localRunArtifactPath(runId, fileName);
+  if (!fs.existsSync(artifactPath) || !fs.statSync(artifactPath).isFile()) {
+    return null;
+  }
+
+  return fs.readFileSync(artifactPath);
+}
+
 export async function readRunArtifactJson<T>(runId: string, fileName: RunArtifactName, schema: z.ZodType<T>): Promise<T | null> {
+  if (!isSafeRunId(runId) || !isSafeRunFileName(fileName)) {
+    return null;
+  }
+
   if (shouldUseBlobStorage()) {
     const store = getBlobStore();
     const raw = await store.get(runArtifactKey(runId, fileName), { type: "json" });
@@ -207,4 +288,17 @@ export async function readRunArtifactJson<T>(runId: string, fileName: RunArtifac
   }
 
   return schema.parse(JSON.parse(readUtf8(artifactPath)));
+}
+
+export function createNetlifyRunRepository(): RunRepository {
+  return createRunRepository({
+    listRunIds,
+    hasRun: async (runId: string) => {
+      const runIds = await listRunIds();
+      return runIds.includes(runId);
+    },
+    readTextArtifact: readRunArtifactText,
+    readBinaryArtifact: readRunArtifactBinary,
+    readJsonArtifact: readRunArtifactJson
+  });
 }

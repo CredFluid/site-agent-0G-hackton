@@ -1,36 +1,19 @@
-# 05 - Extending Personas and Tasks
+# 05 - Extending Accepted Tasks
 
-## Create a new task file
+## Define tasks from explicit input
 
-Add a new JSON file in `src/tasks/`.
+There are no built-in personas or default task files anymore.
+Each run is driven by accepted tasks submitted from the dashboard or passed to the CLI with repeated `--task` flags.
 
-Example skeleton:
+Example CLI input:
 
-```json
-{
-  "persona": {
-    "name": "support-seeking customer",
-    "intent": "Find help fast and judge whether support is trustworthy.",
-    "constraints": [
-      "Use only visible page information",
-      "Behave like a frustrated customer",
-      "Do not use hidden DOM details"
-    ]
-  },
-  "tasks": [
-    {
-      "name": "Find support",
-      "goal": "Locate help or contact options quickly",
-      "success_condition": "Support page or support channel is clearly reachable",
-      "failure_signals": [
-        "no contact path",
-        "help is buried",
-        "support labels are unclear"
-      ]
-    }
-  ]
-}
+```bash
+npm run dev -- --url https://example.com \
+  --task "Find the pricing page and compare the visible plans" \
+  --task "Open the contact path and confirm whether support is easy to reach"
 ```
+
+For game-oriented runs, write the requested behavior directly into the accepted tasks. Example: read the visible how-to-play section, reach a playable state, and play five rounds while recording wins and losses.
 
 ## Good task design
 
@@ -39,6 +22,15 @@ A good task is:
 - time-bounded
 - observable
 - easy to judge from evidence
+- complementary with the other tasks in the suite
+
+Good task sets usually split coverage into a few lanes such as:
+- main journey and orientation
+- discovery and information architecture
+- conversion and trust
+- suspicious interactions and recovery states
+
+That gives the runner broader coverage without asking one task to explain the whole site alone.
 
 ## Bad task design
 

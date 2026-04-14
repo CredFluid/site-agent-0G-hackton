@@ -1,5 +1,13 @@
 node_modules/
 dist/
 .env
+.env.*
+!.env.example
 runs/
+submissions/*
+!submissions/.gitkeep
 playwright-report/
+.netlify/
+.DS_Store
+*.log
+coverage/

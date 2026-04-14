@@ -1,7 +1,9 @@
 import path from "node:path";
 import { buildAgentVariants } from "./agentProfiles.js";
 import { createAggregateRun, type CompletedAgentAudit } from "./aggregateReport.js";
+import { buildCustomTaskSuite } from "./customTaskSuite.js";
 import { runAuditJob } from "./runAuditJob.js";
+import { SUBMISSION_TASKS_REQUIRED_MESSAGE } from "../submissions/customTasks.js";
 import { SubmissionSchema, type Submission } from "../submissions/types.js";
 
 export async function processSubmissionBatch(args: {
@@ -10,7 +12,24 @@ export async function processSubmissionBatch(args: {
   uploadRunArtifacts: (runId: string, runDir: string) => Promise<void>;
   source: string;
 }): Promise<Submission> {
-  const variants = buildAgentVariants(args.submission.taskPath, args.submission.agentCount);
+  if (args.submission.customTasks.length === 0) {
+    const failedSubmission = SubmissionSchema.parse({
+      ...args.submission,
+      status: "failed",
+      startedAt: args.submission.startedAt ?? new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      error: SUBMISSION_TASKS_REQUIRED_MESSAGE,
+      runId: null,
+      runDir: null,
+      reportSummary: null,
+      overallScore: null
+    });
+    await args.writeSubmission(failedSubmission);
+    return failedSubmission;
+  }
+
+  const baseSuite = buildCustomTaskSuite(args.submission.customTasks);
+  const variants = buildAgentVariants(args.submission.agentCount, baseSuite);
   let currentSubmission = SubmissionSchema.parse({
     ...args.submission,
     agentCount: args.submission.agentCount || variants.length,
@@ -95,7 +114,6 @@ export async function processSubmissionBatch(args: {
       try {
         const result = await runAuditJob({
           baseUrl: currentSubmission.url,
-          taskPath: currentSubmission.taskPath,
           suiteOverride: variant.taskSuite,
           headed: currentSubmission.headed,
           mobile: currentSubmission.mobile,
@@ -108,10 +126,13 @@ export async function processSubmissionBatch(args: {
             batchRole: "child",
             parentSubmissionId: currentSubmission.id,
             agentCount: currentSubmission.agentCount,
+            instructionText: currentSubmission.instructionText,
+            instructionFileName: currentSubmission.instructionFileName,
             agentIndex: variant.index,
             agentLabel: variant.label,
             agentProfileLabel: variant.profileLabel,
-            personaVariantKey: variant.personaVariantKey
+            personaVariantKey: variant.personaVariantKey,
+            customTasks: currentSubmission.customTasks
           }
         });
 
@@ -157,6 +178,7 @@ export async function processSubmissionBatch(args: {
           report: result.report,
           taskResults: result.execution.taskResults,
           accessibility: result.execution.accessibility,
+          siteChecks: result.execution.siteChecks,
           runId
         };
       } catch (error) {

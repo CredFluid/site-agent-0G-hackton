@@ -10,7 +10,7 @@ export const config: Config = {
     "/dashboard",
     "/submissions/:id",
     "/r/:token",
-    "/reports/:runId",
+    "/outputs/:runId",
     "/api/runs",
     "/api/runs/:runId",
     "/api/runs/:runId/artifacts/:fileName"

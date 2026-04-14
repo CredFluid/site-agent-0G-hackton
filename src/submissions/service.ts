@@ -8,11 +8,13 @@ export class SubmissionService {
 
   async createSubmission(args: {
     url: string;
-    taskPath?: string;
     headed?: boolean;
     mobile?: boolean;
     ignoreHttpsErrors?: boolean;
     agentCount?: number;
+    customTasks?: string[];
+    instructionText?: string;
+    instructionFileName?: string | null;
   }): Promise<Submission> {
     const submission = createSubmissionRecord(args);
     writeSubmission(submission);

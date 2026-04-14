@@ -2,19 +2,29 @@ import type { TaskSuite } from "../schemas/types.js";
 import path from "node:path";
 import { clampRunDurationMs, config, deriveBrowserExecutionBudgetMs, deriveReportingReserveMs } from "../config.js";
 import { evaluateRun } from "./evaluator.js";
-import { loadTaskSuite } from "./loadTaskSuite.js";
 import { runTaskSuite } from "./runner.js";
+import { generateClickReplay } from "../reporting/clickReplay.js";
 import { renderHtmlReport } from "../reporting/html.js";
 import { renderMarkdownReport } from "../reporting/markdown.js";
-import { resolveRunDir, writeJson, writeText } from "../utils/files.js";
+import { ensureDir, resolveRunDir, writeJson, writeText } from "../utils/files.js";
+
+function summarizeSessionPath(filePath: string): string {
+  const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath);
+  const relativePath = path.relative(process.cwd(), resolvedPath);
+  return relativePath && relativePath !== "" && !relativePath.startsWith("..")
+    ? relativePath
+    : path.basename(resolvedPath);
+}
 
 export async function runAuditJob(options: {
   baseUrl: string;
-  taskPath?: string;
-  suiteOverride?: TaskSuite;
+  runDir?: string;
+  suiteOverride: TaskSuite;
   headed?: boolean;
   mobile?: boolean;
   ignoreHttpsErrors?: boolean;
+  storageStatePath?: string | undefined;
+  saveStorageStatePath?: string | undefined;
   maxSessionDurationMs?: number;
   extraInputs?: Record<string, unknown>;
 }): Promise<{
@@ -22,11 +32,10 @@ export async function runAuditJob(options: {
   runDir: string;
   report: Awaited<ReturnType<typeof evaluateRun>>;
   execution: Awaited<ReturnType<typeof runTaskSuite>>;
-  taskPath: string;
 }> {
-  const taskPath = options.taskPath ?? "src/tasks/first_time_buyer.json";
-  const suite = options.suiteOverride ?? loadTaskSuite(taskPath);
-  const runDir = resolveRunDir(options.baseUrl);
+  const suite = options.suiteOverride;
+  const runDir = options.runDir ?? resolveRunDir(options.baseUrl);
+  ensureDir(runDir);
   const inputsPath = path.join(runDir, "inputs.json");
   const startedAt = new Date().toISOString();
   const startedAtMs = Date.now();
@@ -34,13 +43,22 @@ export async function runAuditJob(options: {
   const maxRunDurationMs = clampRunDurationMs(requestedMaxSessionDurationMs);
   const browserExecutionBudgetMs = deriveBrowserExecutionBudgetMs(maxRunDurationMs);
   const reportingReserveMs = deriveReportingReserveMs(maxRunDurationMs);
+  const storageStatePath = options.storageStatePath ?? config.playwrightStorageStatePath;
+  const saveStorageStatePath = options.saveStorageStatePath;
+  const instructionText =
+    typeof options.extraInputs?.instructionText === "string"
+      ? options.extraInputs.instructionText
+      : suite.tasks.map((task) => task.goal).join("\n");
   const baseInputs = {
     baseUrl: options.baseUrl,
-    taskPath,
     persona: suite.persona.name,
     headed: Boolean(options.headed),
     mobile: Boolean(options.mobile),
     ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
+    storageStateLoaded: Boolean(storageStatePath),
+    storageStateSource: storageStatePath ? summarizeSessionPath(storageStatePath) : null,
+    saveStorageStateRequested: Boolean(saveStorageStatePath),
+    saveStorageStateTarget: saveStorageStatePath ? summarizeSessionPath(saveStorageStatePath) : null,
     model: config.model,
     startedAt,
     maxRunDurationMs,
@@ -50,6 +68,7 @@ export async function runAuditJob(options: {
     maxRunDurationClamped: maxRunDurationMs !== requestedMaxSessionDurationMs,
     deviceTimezone: config.deviceTimezone,
     synchronizedTimezone: config.deviceTimezone,
+    customTasks: suite.tasks.map((task) => task.goal),
     ...(options.extraInputs ?? {})
   };
 
@@ -62,22 +81,46 @@ export async function runAuditJob(options: {
     headed: Boolean(options.headed),
     mobile: Boolean(options.mobile),
     ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
+    storageStatePath,
+    saveStorageStatePath,
     maxSessionDurationMs: browserExecutionBudgetMs
   });
 
+  let clickReplayArtifact: string | null = null;
+  let clickReplayFrameCount: number | null = null;
+  let clickReplayDurationMs: number | null = null;
+
+  try {
+    const clickReplay = await generateClickReplay({
+      runDir,
+      taskResults: execution.taskResults
+    });
+    clickReplayArtifact = clickReplay?.artifactName ?? null;
+    clickReplayFrameCount = clickReplay?.frameCount ?? null;
+    clickReplayDurationMs = clickReplay?.durationMs ?? null;
+  } catch {
+    // Replay generation is optional and should never block the main report.
+  }
+
   writeJson(inputsPath, {
     ...baseInputs,
+    ...(execution.siteBrief ? { siteBrief: execution.siteBrief } : {}),
     browserTimezone: execution.browserTimezone,
-    synchronizedTimezone: execution.browserTimezone || execution.deviceTimezone
+    synchronizedTimezone: execution.browserTimezone || execution.deviceTimezone,
+    ...(clickReplayArtifact ? { clickReplayArtifact } : {}),
+    ...(clickReplayFrameCount !== null ? { clickReplayFrameCount } : {}),
+    ...(clickReplayDurationMs !== null ? { clickReplayDurationMs } : {})
   });
 
   const remainingEvaluationBudgetMs = Math.max(0, maxRunDurationMs - (Date.now() - startedAtMs));
   const report = await evaluateRun({
     baseUrl: options.baseUrl,
     suite,
+    siteBrief: execution.siteBrief,
     taskResults: execution.taskResults,
     rawEvents: execution.rawEvents,
     accessibility: execution.accessibility,
+    mobile: Boolean(options.mobile),
     timeoutMs: remainingEvaluationBudgetMs,
     totalRunDurationMs: maxRunDurationMs
   });
@@ -88,10 +131,17 @@ export async function runAuditJob(options: {
     renderHtmlReport({
       website: options.baseUrl,
       persona: suite.persona.name,
+      acceptedTasks: suite.tasks.map((task) => task.goal),
+      instructionText,
       report,
       taskResults: execution.taskResults,
+      accessibility: execution.accessibility,
+      siteChecks: execution.siteChecks,
+      siteBrief: execution.siteBrief,
+      rawEvents: execution.rawEvents,
       runId: path.basename(runDir),
       startedAt,
+      mobile: Boolean(options.mobile),
       timeZone: execution.browserTimezone || execution.deviceTimezone
     })
   );
@@ -100,7 +150,17 @@ export async function runAuditJob(options: {
     renderMarkdownReport({
       website: options.baseUrl,
       persona: suite.persona.name,
-      report
+      acceptedTasks: suite.tasks.map((task) => task.goal),
+      instructionText,
+      report,
+      taskResults: execution.taskResults,
+      accessibility: execution.accessibility,
+      siteChecks: execution.siteChecks,
+      siteBrief: execution.siteBrief,
+      rawEvents: execution.rawEvents,
+      startedAt,
+      mobile: Boolean(options.mobile),
+      timeZone: execution.browserTimezone || execution.deviceTimezone
     })
   );
 
@@ -108,7 +168,6 @@ export async function runAuditJob(options: {
     startedAt,
     runDir,
     report,
-    execution,
-    taskPath
+    execution
   };
 }
