@@ -1,6 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { chromium, devices, type Browser, type BrowserContext, type BrowserContextOptions, type LaunchOptions, type Page } from "playwright";
+import {
+  chromium,
+  devices,
+  type Browser,
+  type BrowserContext,
+  type BrowserContextOptions,
+  type LaunchOptions,
+  type Page
+} from "playwright";
 import { isAuthBootstrapConfigured } from "../auth/profile.js";
 import { detectAuthWall, runAuthFlowInContext } from "../auth/runner.js";
 import { clampRunDurationMs, config } from "../config.js";
@@ -21,7 +29,14 @@ import {
 } from "./taskHeuristics.js";
 import { ensureDir, writeJson } from "../utils/files.js";
 import { sleep } from "../utils/time.js";
-import type { PageState, SiteBrief, SiteChecks, TaskHistoryEntry, TaskRunResult, TaskSuite } from "../schemas/types.js";
+import type {
+  PageState,
+  SiteBrief,
+  SiteChecks,
+  TaskHistoryEntry,
+  TaskRunResult,
+  TaskSuite
+} from "../schemas/types.js";
 
 export type RunOptions = {
   baseUrl: string;
@@ -72,12 +87,28 @@ type ServerlessChromiumModule = {
 };
 
 function shouldUseServerlessChromium(): boolean {
-  return process.env.USE_SERVERLESS_CHROMIUM === "true" || process.env.NETLIFY === "true";
+  const useServerless =
+    process.env.USE_SERVERLESS_CHROMIUM === "true" ||
+    process.env.NETLIFY_LOCAL === "true" ||
+    Boolean(process.env.SITE_ID) ||
+    Boolean(process.env.URL);
+
+  console.log("chromium mode", {
+    useServerless,
+    USE_SERVERLESS_CHROMIUM: process.env.USE_SERVERLESS_CHROMIUM,
+    NETLIFY: process.env.NETLIFY,
+    NETLIFY_LOCAL: process.env.NETLIFY_LOCAL,
+    SITE_ID: process.env.SITE_ID,
+    URL: process.env.URL
+  });
+
+  return useServerless;
 }
 
 async function resolveLaunchOptions(options: { headed: boolean | undefined }): Promise<LaunchOptions> {
   const explicitExecutablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH?.trim();
   if (explicitExecutablePath) {
+    console.log("launch options: using explicit executable path");
     return {
       executablePath: explicitExecutablePath,
       headless: options.headed ? false : config.headless
@@ -85,6 +116,7 @@ async function resolveLaunchOptions(options: { headed: boolean | undefined }): P
   }
 
   if (!shouldUseServerlessChromium()) {
+    console.log("launch options: using default Playwright browser");
     return {
       headless: options.headed ? false : config.headless
     };
@@ -98,6 +130,10 @@ async function resolveLaunchOptions(options: { headed: boolean | undefined }): P
   if ("setGraphicsMode" in serverlessChromium) {
     serverlessChromium.setGraphicsMode = false;
   }
+
+  console.log("launch options: using serverless chromium", {
+    location: location ?? null
+  });
 
   return {
     args: serverlessChromium.args,
@@ -243,7 +279,7 @@ function inferTaskStatus(
   const successfulActions = history.filter((entry) => entry.result.success);
   const successfulClicks = history.filter((entry) => entry.decision.action === "click" && entry.result.success);
   const isSetupOrGateControl = (target: string): boolean =>
-    /(?:create|register|sign ?up|log ?in|sign ?in|continue|enter|unlock|access|submit|profile)/i.test(target);
+    /(?:create|register|sign ?up|log ?in|continue|enter|unlock|access|submit|profile)/i.test(target);
   const meaningfulEngagementClicks = successfulClicks.filter((entry) => {
     const target = entry.decision.target.trim();
     const engagementText = [
@@ -1135,5 +1171,13 @@ export async function runTaskSuite(options: RunOptions): Promise<{
     await browser?.close().catch(() => undefined);
   }
 
-  return { rawEvents, taskResults, accessibility, siteChecks, siteBrief, browserTimezone, deviceTimezone: config.deviceTimezone };
+  return {
+    rawEvents,
+    taskResults,
+    accessibility,
+    siteChecks,
+    siteBrief,
+    browserTimezone,
+    deviceTimezone: config.deviceTimezone
+  };
 }
