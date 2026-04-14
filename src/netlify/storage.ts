@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getStore } from "@netlify/blobs";
 import { z } from "zod";
-import { createRunRepository, type RunRepository } from "../backend/runRepository.js";
+import { createRunRepository } from "../backend/runRepository.js";
 import { isImageArtifact, isSafeRunFileName } from "../backend/runArtifacts.js";
 import { SubmissionSchema, type Submission } from "../submissions/types.js";
 import { readUtf8, resolveRunsDir, resolveSubmissionsDir, writeJson } from "../utils/files.js";
@@ -19,12 +19,10 @@ export const RUN_ARTIFACT_NAMES = [
   "click-replay.webp"
 ] as const;
 
-export type RunArtifactName = string;
-
 const RUNS_INDEX_KEY = "runs/index.json";
 const STORE_NAME = "site-agent-pro";
 
-const JSON_RUN_ARTIFACTS = new Set<string>([
+const JSON_RUN_ARTIFACTS = new Set([
   "inputs.json",
   "raw-events.json",
   "task-results.json",
@@ -33,19 +31,29 @@ const JSON_RUN_ARTIFACTS = new Set<string>([
   "report.json"
 ]);
 
-const TEXT_RUN_ARTIFACTS = new Set<string>(["report.html", "report.md"]);
-const BINARY_RUN_ARTIFACTS = new Set<string>(["click-replay.webp"]);
+const TEXT_RUN_ARTIFACTS = new Set(["report.html", "report.md"]);
+const BINARY_RUN_ARTIFACTS = new Set(["click-replay.webp"]);
+
+type ClaimSubmissionResult =
+  | { ok: true; reason: "claimed"; submission: Submission }
+  | {
+      ok: false;
+      reason:
+        | "not_found"
+        | "already_completed"
+        | "already_running"
+        | "claim_verify_failed"
+        | "claim_lost";
+      submission: Submission | null;
+    };
 
 function shouldUseBlobStorage(): boolean {
-  const useBlobs =
-    process.env.NETLIFY === "true" || process.env.NETLIFY_LOCAL === "true";
-
+  const useBlobs = process.env.NETLIFY === "true" || process.env.NETLIFY_LOCAL === "true";
   console.log("storage mode", {
     useBlobs,
     NETLIFY: process.env.NETLIFY,
     NETLIFY_LOCAL: process.env.NETLIFY_LOCAL
   });
-
   return useBlobs;
 }
 
@@ -56,7 +64,7 @@ function getBlobStore() {
   });
 }
 
-function runArtifactKey(runId: string, fileName: RunArtifactName): string {
+function runArtifactKey(runId: string, fileName: string): string {
   return `runs/${runId}/${fileName}`;
 }
 
@@ -68,7 +76,7 @@ function localSubmissionPath(id: string): string {
   return path.join(resolveSubmissionsDir(), `${id}.json`);
 }
 
-function localRunArtifactPath(runId: string, fileName: RunArtifactName): string {
+function localRunArtifactPath(runId: string, fileName: string): string {
   return path.join(resolveRunsDir(), runId, fileName);
 }
 
@@ -169,10 +177,54 @@ export async function readSubmission(id: string): Promise<Submission | null> {
   return SubmissionSchema.parse(JSON.parse(readUtf8(filePath)));
 }
 
+export async function claimSubmissionForProcessing(id: string): Promise<ClaimSubmissionResult> {
+  const submission = await readSubmission(id);
+
+  if (!submission) {
+    return { ok: false, reason: "not_found", submission: null };
+  }
+
+  if (submission.status === "completed") {
+    return { ok: false, reason: "already_completed", submission };
+  }
+
+  if (submission.status === "running") {
+    return { ok: false, reason: "already_running", submission };
+  }
+
+  const startedAt = new Date().toISOString();
+
+  const claimedSubmission = SubmissionSchema.parse({
+    ...submission,
+    status: "running",
+    startedAt,
+    completedAt: null,
+    error: null
+  });
+
+  await writeSubmission(claimedSubmission);
+
+  const verified = await readSubmission(id);
+  if (!verified) {
+    return { ok: false, reason: "claim_verify_failed", submission: null };
+  }
+
+  if (verified.status !== "running") {
+    return { ok: false, reason: "claim_verify_failed", submission: verified };
+  }
+
+  if (verified.startedAt !== startedAt) {
+    return { ok: false, reason: "claim_lost", submission: verified };
+  }
+
+  return { ok: true, reason: "claimed", submission: verified };
+}
+
 export async function listSubmissions(): Promise<Submission[]> {
   if (shouldUseBlobStorage()) {
     const store = getBlobStore();
     const { blobs } = await store.list({ prefix: "submissions/" });
+
     const submissions = await Promise.all(
       blobs
         .map((entry) => entry.key)
@@ -196,7 +248,9 @@ export async function listSubmissions(): Promise<Submission[]> {
   return fs
     .readdirSync(submissionsDir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-    .map((entry) => SubmissionSchema.parse(JSON.parse(readUtf8(path.join(submissionsDir, entry.name)))))
+    .map((entry) =>
+      SubmissionSchema.parse(JSON.parse(readUtf8(path.join(submissionsDir, entry.name))))
+    )
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
@@ -247,7 +301,7 @@ export async function uploadRunArtifacts(runId: string, runDir: string): Promise
   await recordRunId(runId);
 }
 
-export async function readRunArtifactText(runId: string, fileName: RunArtifactName): Promise<string | null> {
+export async function readRunArtifactText(runId: string, fileName: string): Promise<string | null> {
   if (!isSafeRunId(runId) || !isSafeRunFileName(fileName)) {
     return null;
   }
@@ -265,7 +319,7 @@ export async function readRunArtifactText(runId: string, fileName: RunArtifactNa
   return readUtf8(artifactPath);
 }
 
-export async function readRunArtifactBinary(runId: string, fileName: RunArtifactName): Promise<Buffer | null> {
+export async function readRunArtifactBinary(runId: string, fileName: string): Promise<Buffer | null> {
   if (!isSafeRunId(runId) || !isSafeRunFileName(fileName)) {
     return null;
   }
@@ -286,7 +340,7 @@ export async function readRunArtifactBinary(runId: string, fileName: RunArtifact
 
 export async function readRunArtifactJson<T>(
   runId: string,
-  fileName: RunArtifactName,
+  fileName: string,
   schema: z.ZodType<T>
 ): Promise<T | null> {
   if (!isSafeRunId(runId) || !isSafeRunFileName(fileName)) {
@@ -307,7 +361,7 @@ export async function readRunArtifactJson<T>(
   return schema.parse(JSON.parse(readUtf8(artifactPath)));
 }
 
-export function createNetlifyRunRepository(): RunRepository {
+export function createNetlifyRunRepository() {
   return createRunRepository({
     listRunIds,
     hasRun: async (runId: string) => {
