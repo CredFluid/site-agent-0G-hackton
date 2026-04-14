@@ -97,6 +97,7 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
     const normalizedAgentCount = Number.isFinite(requestedAgentCount)
       ? Math.min(5, Math.max(1, Math.round(requestedAgentCount)))
       : 1;
+
     const urlValidation = validatePublicUrl(urlInput);
     const submissionError = !urlValidation.valid
       ? urlValidation.reason ?? "Enter a valid public URL."
@@ -129,7 +130,8 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
     const verify = await readSubmission(submission.id);
     console.log("submission persisted after write", {
       submissionId: submission.id,
-      found: !!verify
+      found: !!verify,
+      status: verify?.status ?? null
     });
 
     try {
@@ -139,9 +141,11 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown background invocation failure";
+
       await writeSubmission({
         ...submission,
         status: "failed",
+        startedAt: null,
         completedAt: new Date().toISOString(),
         error: message
       });
@@ -161,6 +165,7 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
   if (requestUrl.pathname === "/dashboard") {
     const requestedRunId = requestUrl.searchParams.get("run");
     const data = await loadDashboardData(requestedRunId);
+
     return respondText(
       renderDashboardPage({
         runs: data.runs,
@@ -211,6 +216,7 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
               title: "Task output not ready",
               message: access.reason ?? "This task output is not ready yet."
             });
+
       const statusCode = access.reason === "This task output link has expired." ? 410 : 202;
       return respondText(html, { status: statusCode, contentType: "text/html" });
     }
@@ -242,6 +248,7 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
   if (requestUrl.pathname === "/api/runs") {
     const summaries = (await Promise.all((await listRunIds()).map((runId) => buildRunSummary(runId))))
       .filter((run) => run.batchRole !== "child");
+
     return respondJson(summaries);
   }
 
@@ -278,6 +285,7 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
       if (fileName === "report.html") {
         const htmlReport =
           (await readRunArtifactText(runId, "report.html")) ?? (await buildStandaloneReportHtml(runId));
+
         if (!htmlReport) {
           return respondJson({ error: `Artifact '${fileName}' not found.` }, 404);
         }
