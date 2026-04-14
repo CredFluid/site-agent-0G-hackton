@@ -23,6 +23,7 @@ export type RunArtifactName = string;
 
 const RUNS_INDEX_KEY = "runs/index.json";
 const STORE_NAME = "site-agent-pro";
+
 const JSON_RUN_ARTIFACTS = new Set<string>([
   "inputs.json",
   "raw-events.json",
@@ -36,11 +37,23 @@ const TEXT_RUN_ARTIFACTS = new Set<string>(["report.html", "report.md"]);
 const BINARY_RUN_ARTIFACTS = new Set<string>(["click-replay.webp"]);
 
 function shouldUseBlobStorage(): boolean {
-  return process.env.NETLIFY === "true" || process.env.NETLIFY_LOCAL === "true";
+  const useBlobs =
+    process.env.NETLIFY === "true" || process.env.NETLIFY_LOCAL === "true";
+
+  console.log("storage mode", {
+    useBlobs,
+    NETLIFY: process.env.NETLIFY,
+    NETLIFY_LOCAL: process.env.NETLIFY_LOCAL
+  });
+
+  return useBlobs;
 }
 
 function getBlobStore() {
-  return getStore(STORE_NAME);
+  return getStore({
+    name: STORE_NAME,
+    consistency: "strong"
+  });
 }
 
 function runArtifactKey(runId: string, fileName: RunArtifactName): string {
@@ -271,7 +284,11 @@ export async function readRunArtifactBinary(runId: string, fileName: RunArtifact
   return fs.readFileSync(artifactPath);
 }
 
-export async function readRunArtifactJson<T>(runId: string, fileName: RunArtifactName, schema: z.ZodType<T>): Promise<T | null> {
+export async function readRunArtifactJson<T>(
+  runId: string,
+  fileName: RunArtifactName,
+  schema: z.ZodType<T>
+): Promise<T | null> {
   if (!isSafeRunId(runId) || !isSafeRunFileName(fileName)) {
     return null;
   }

@@ -14,7 +14,13 @@ import {
   readSubmission,
   writeSubmission
 } from "./storage.js";
-import { renderExpiredReportPage, renderLandingPage, renderReportUnavailablePage, renderSubmissionStatusPage, canAccessPublicReport } from "../submissions/html.js";
+import {
+  renderExpiredReportPage,
+  renderLandingPage,
+  renderReportUnavailablePage,
+  renderSubmissionStatusPage,
+  canAccessPublicReport
+} from "../submissions/html.js";
 import { validatePublicUrl } from "../submissions/publicUrl.js";
 import { createSubmissionRecord } from "../submissions/model.js";
 import { config } from "../config.js";
@@ -59,6 +65,7 @@ function redirect(location: string, status = 303): Response {
 async function triggerBackgroundSubmission(args: { origin: string; submissionId: string }): Promise<void> {
   const endpoint = new URL("/.netlify/functions/process-submission-background", args.origin);
   const secret = process.env.INTERNAL_JOB_SECRET?.trim();
+
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
@@ -119,6 +126,12 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
 
     await writeSubmission(submission);
 
+    const verify = await readSubmission(submission.id);
+    console.log("submission persisted after write", {
+      submissionId: submission.id,
+      found: !!verify
+    });
+
     try {
       await triggerBackgroundSubmission({
         origin: requestUrl.origin,
@@ -171,10 +184,10 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
       );
     }
 
-    return respondText(
-      renderSubmissionStatusPage({ appBaseUrl, submission }),
-      { status: 200, contentType: "text/html" }
-    );
+    return respondText(renderSubmissionStatusPage({ appBaseUrl, submission }), {
+      status: 200,
+      contentType: "text/html"
+    });
   }
 
   if (pathParts[0] === "r" && pathParts[1] && pathParts.length === 2) {
@@ -256,17 +269,15 @@ export async function handleNetlifyAppRequest(req: Request): Promise<Response> {
           return respondJson({ error: `Artifact '${fileName}' not found.` }, 404);
         }
 
-        return respondBinary(
-          Uint8Array.from(artifact).buffer,
-          {
-            status: 200,
-            contentType: artifactContentType(fileName)
-          }
-        );
+        return respondBinary(Uint8Array.from(artifact).buffer, {
+          status: 200,
+          contentType: artifactContentType(fileName)
+        });
       }
 
       if (fileName === "report.html") {
-        const htmlReport = (await readRunArtifactText(runId, "report.html")) ?? (await buildStandaloneReportHtml(runId));
+        const htmlReport =
+          (await readRunArtifactText(runId, "report.html")) ?? (await buildStandaloneReportHtml(runId));
         if (!htmlReport) {
           return respondJson({ error: `Artifact '${fileName}' not found.` }, 404);
         }
