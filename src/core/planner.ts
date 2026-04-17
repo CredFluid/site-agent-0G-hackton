@@ -4,7 +4,6 @@ import { generateStructured } from "../llm/client.js";
 import { BROWSER_AGENT_PROMPT } from "../prompts/browserAgent.js";
 import {
   classifyTaskText,
-  isRegressiveTaskControlLabel,
   normalizeTaskText,
   scoreInteractiveForTask,
   textHasInstructionCue,
@@ -21,7 +20,7 @@ import {
 
 const PLANNER_TIMEOUT_MS = 30000;
 const PLANNER_MAX_RETRIES = 3;
-const ORDERED_STEP_PATTERNS = [/^step\s+\d+\b/i, /^\d+[\.\)]\s+/, /^(first|second|third|fourth|fifth|next|then|finally)\b/i];
+const ORDERED_STEP_PATTERNS = [/^step\s+\d+\b/i, /^\d+[.)]\s+/, /^(first|second|third|fourth|fifth|next|then|finally)\b/i];
 const ACTIONABLE_INSTRUCTION_PATTERNS = [
   /^(?:step\s+\d+[:.)-]?\s*)?(?:click|tap|press|select|choose|open)\b/i,
   /^(?:step\s+\d+[:.)-]?\s*)?(?:enter|type|fill|input|provide)\b/i,
@@ -146,6 +145,23 @@ function normalizeKey(value: string): string {
   return normalizeLineText(value).toLowerCase();
 }
 
+function stripOrderedStepPrefix(value: string): string {
+  return normalizeLineText(value)
+    .replace(/^step\s+\d+\s*[:.)-]?\s*/i, "")
+    .replace(/^\d+\s*[.):-]\s*/, "")
+    .replace(/^(?:first|second|third|fourth|fifth|next|then|finally)\s*[:,.-]?\s*/i, "")
+    .trim();
+}
+
+function buildInstructionLineCandidates(instructionQuote: string): string[] {
+  const candidates = [
+    normalizeLineText(instructionQuote),
+    stripOrderedStepPrefix(instructionQuote)
+  ].filter(Boolean);
+
+  return [...new Set(candidates)];
+}
+
 function buildStopDecision(args: {
   thought: string;
   expectation: string;
@@ -213,8 +229,8 @@ function cleanInstructionTarget(value: string): string {
 }
 
 function extractClickTarget(instructionQuote: string): string | null {
-  const match = instructionQuote.match(
-    /^(?:step\s+\d+[:.)-]?\s*)?(?:click|tap|press|select|choose|open)\s+(?:the\s+)?["'“]?([^"'”]+?)["'”]?(?:\s+(?:button|link|tab|menu|menu item|option|card))?(?:[.!?].*)?$/i
+  const match = stripOrderedStepPrefix(instructionQuote).match(
+    /^(?:click|tap|press|select|choose|open)\s+(?:the\s+)?["'“]?([^"'”]+?)["'”]?(?:\s+(?:button|link|tab|menu|menu item|option|card))?(?:[.!?].*)?$/i
   );
   const target = cleanInstructionTarget(match?.[1] ?? "");
   return target || null;
@@ -222,6 +238,7 @@ function extractClickTarget(instructionQuote: string): string | null {
 
 function extractTypeTarget(instructionQuote: string): string | null {
   const normalized = normalizeLineText(instructionQuote);
+  const stripped = stripOrderedStepPrefix(instructionQuote);
   const explicitMatch = normalized.match(
     /^(?:step\s+\d+[:.)-]?\s*)?(?:enter|type|fill|input|provide)\s+(?:your\s+|the\s+)?(.+?)(?:\s+(?:field|box|input|value|details?))?(?:[.!?].*)?$/i
   );
@@ -230,30 +247,33 @@ function extractTypeTarget(instructionQuote: string): string | null {
   }
 
   return ORDERED_STEP_PATTERNS.some((pattern) => pattern.test(normalized))
-    ? cleanInstructionTarget(normalized.replace(/^step\s+\d+[:.)-]?\s*/i, "")) || null
+    ? cleanInstructionTarget(stripped) || null
     : null;
 }
 
 function findInteractiveTarget(pageState: PageState, instructionQuote: string): string | null {
-  const normalizedLine = normalizeKey(instructionQuote);
-  const exact = pageState.interactive.find((item) => normalizeKey(item.text || item.href || "") === normalizedLine);
-  if (exact) {
-    return normalizeLineText(exact.text || exact.href || "");
+  for (const candidate of buildInstructionLineCandidates(instructionQuote)) {
+    const normalizedLine = normalizeKey(candidate);
+    const exact = pageState.interactive.find((item) => normalizeKey(item.text || item.href || "") === normalizedLine);
+    if (exact) {
+      return normalizeLineText(exact.text || exact.href || "");
+    }
   }
 
   return null;
 }
 
 function findMatchingFormField(pageState: PageState, instructionQuote: string): PageState["formFields"][number] | null {
-  const normalizedLine = normalizeKey(instructionQuote);
-  const normalizedTarget = normalizeKey(extractTypeTarget(instructionQuote) ?? instructionQuote);
-  const candidates = pageState.formFields
+  const instructionCandidates = buildInstructionLineCandidates(instructionQuote);
+  const normalizedLineCandidates = instructionCandidates.map((value) => normalizeKey(value));
+  const normalizedTarget = normalizeKey(extractTypeTarget(instructionQuote) ?? instructionCandidates[0] ?? instructionQuote);
+  const rankedCandidates = pageState.formFields
     .map((field) => {
       const haystack = [field.label, field.placeholder, field.name, field.id].map((value) => normalizeKey(value)).filter(Boolean);
       let score = 0;
 
       for (const value of haystack) {
-        if (value === normalizedLine) {
+        if (normalizedLineCandidates.includes(value)) {
           score = Math.max(score, 120);
         }
         if (value === normalizedTarget) {
@@ -273,7 +293,7 @@ function findMatchingFormField(pageState: PageState, instructionQuote: string): 
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score);
 
-  return candidates[0]?.field ?? null;
+  return rankedCandidates[0]?.field ?? null;
 }
 
 function inferFormFieldValue(field: PageState["formFields"][number]): string | null {
@@ -590,6 +610,197 @@ function pageHasStrictStepContent(pageState: PageState): boolean {
   return extractOrderedInstructionLines(pageState).length > 0;
 }
 
+function buildDecisionFromVisibleInstruction(args: {
+  pageState: PageState;
+  instruction: { stepNumber: number; instructionQuote: string };
+}): PlannerDecision {
+  const matchingField = findMatchingFormField(args.pageState, args.instruction.instructionQuote);
+  if (matchingField) {
+    const formValue = inferFormFieldValue(matchingField);
+    if (formValue) {
+      const target = resolveFormFieldTarget(matchingField);
+      return {
+        thought: "The next unread visible instruction points to a form field that can be advanced safely with the reusable dummy details.",
+        stepNumber: args.instruction.stepNumber,
+        instructionQuote: args.instruction.instructionQuote,
+        action: "type",
+        target,
+        text: formValue,
+        expectation: `Fill '${target}' for this single step, then wait for the form state to update before moving on.`,
+        friction: "medium"
+      };
+    }
+  }
+
+  const directInteractiveTarget = findInteractiveTarget(args.pageState, args.instruction.instructionQuote);
+  if (directInteractiveTarget) {
+    return {
+      thought: "The next unread visible instruction directly matches a visible control, so follow that exact step before considering anything later on the page.",
+      stepNumber: args.instruction.stepNumber,
+      instructionQuote: args.instruction.instructionQuote,
+      action: "click",
+      target: directInteractiveTarget,
+      text: "",
+      expectation: `Click only '${directInteractiveTarget}' and wait for the page to update before considering any later instruction.`,
+      friction: ACCESS_GATE_PATTERNS.some((pattern) => pattern.test(args.instruction.instructionQuote)) ? "low" : "medium"
+    };
+  }
+
+  const clickTarget = extractClickTarget(args.instruction.instructionQuote);
+  if (clickTarget) {
+    return {
+      thought: "The next unread visible instruction explicitly names a control, so follow that single step without skipping ahead.",
+      stepNumber: args.instruction.stepNumber,
+      instructionQuote: args.instruction.instructionQuote,
+      action: "click",
+      target: clickTarget,
+      text: "",
+      expectation: `Click only '${clickTarget}' and wait for the page to update before considering any later instruction.`,
+      friction: "medium"
+    };
+  }
+
+  const typeTarget = extractTypeTarget(args.instruction.instructionQuote);
+  if (typeTarget) {
+    const field = findMatchingFormField(args.pageState, typeTarget);
+    const formValue = field ? inferFormFieldValue(field) : null;
+
+    if (field && formValue) {
+      const target = resolveFormFieldTarget(field);
+      return {
+        thought: "The next unread visible instruction explicitly asks for input and a matching visible field is present.",
+        stepNumber: args.instruction.stepNumber,
+        instructionQuote: args.instruction.instructionQuote,
+        action: "type",
+        target,
+        text: formValue,
+        expectation: `Fill '${target}' for this one step and wait for the form to reflect the new value before moving on.`,
+        friction: "medium"
+      };
+    }
+  }
+
+  if (/^(?:step\s+\d+[:.)-]?\s*)?(?:scroll|swipe)\b/i.test(args.instruction.instructionQuote)) {
+    return {
+      thought: "The next unread visible instruction is an explicit scroll step.",
+      stepNumber: args.instruction.stepNumber,
+      instructionQuote: args.instruction.instructionQuote,
+      action: "scroll",
+      target: "",
+      text: "",
+      expectation: "Scroll once, then wait for the page to settle before evaluating the next visible instruction.",
+      friction: "low"
+    };
+  }
+
+  if (/^(?:step\s+\d+[:.)-]?\s*)?(?:wait|pause|hold)\b/i.test(args.instruction.instructionQuote)) {
+    return {
+      thought: "The next unread visible instruction explicitly says to wait.",
+      stepNumber: args.instruction.stepNumber,
+      instructionQuote: args.instruction.instructionQuote,
+      action: "wait",
+      target: "",
+      text: "",
+      expectation: "Wait briefly, observe the result, and do not execute any later step yet.",
+      friction: "low"
+    };
+  }
+
+  if (/^(?:step\s+\d+[:.)-]?\s*)?(?:go back|back)\b/i.test(args.instruction.instructionQuote)) {
+    return {
+      thought: "The next unread visible instruction explicitly says to go back.",
+      stepNumber: args.instruction.stepNumber,
+      instructionQuote: args.instruction.instructionQuote,
+      action: "back",
+      target: "",
+      text: "",
+      expectation: "Go back once and wait for the page update before reading further instructions.",
+      friction: "medium"
+    };
+  }
+
+  return buildStopDecision({
+    thought: "The next visible instruction cannot be executed safely without guessing, so the run should stop instead of inventing a different action.",
+    expectation: "Stop and report that the current step is ambiguous instead of inferring a missing action.",
+    stepNumber: args.instruction.stepNumber,
+    instructionQuote: args.instruction.instructionQuote
+  });
+}
+
+function decisionMatchesExpectedInstruction(args: {
+  pageState: PageState;
+  decision: PlannerDecision;
+  expected: PlannerDecision;
+}): boolean {
+  if (args.decision.action !== args.expected.action) {
+    return false;
+  }
+
+  if (args.decision.stepNumber !== args.expected.stepNumber) {
+    return false;
+  }
+
+  if (normalizeLineText(args.decision.instructionQuote || "") !== normalizeLineText(args.expected.instructionQuote || "")) {
+    return false;
+  }
+
+  if (args.expected.action === "click") {
+    return normalizeKey(args.decision.target || "") === normalizeKey(args.expected.target || "");
+  }
+
+  if (args.expected.action === "type") {
+    const expectedField = findMatchingFormField(args.pageState, args.expected.target || args.expected.instructionQuote);
+    const actualField = findMatchingFormField(args.pageState, args.decision.target || args.decision.instructionQuote);
+
+    if (expectedField && actualField) {
+      return expectedField === actualField;
+    }
+
+    return normalizeKey(args.decision.target || "") === normalizeKey(args.expected.target || "");
+  }
+
+  return true;
+}
+
+function enforceInstructionOrderDecision(args: {
+  pageState: PageState;
+  history: TaskHistoryEntry[];
+  decision: PlannerDecision;
+}): PlannerDecision {
+  const nextInstruction = findNextInstruction({
+    pageState: args.pageState,
+    history: args.history
+  });
+
+  if (nextInstruction) {
+    const expected = buildDecisionFromVisibleInstruction({
+      pageState: args.pageState,
+      instruction: nextInstruction
+    });
+
+    return decisionMatchesExpectedInstruction({
+      pageState: args.pageState,
+      decision: args.decision,
+      expected
+    })
+      ? args.decision
+      : expected;
+  }
+
+  if (!pageHasStrictStepContent(args.pageState)) {
+    return args.decision;
+  }
+
+  if (args.decision.action === "extract" || args.decision.action === "stop") {
+    return args.decision;
+  }
+
+  return buildStopDecision({
+    thought: "The page still presents ordered step content, but there are no unread actionable instructions left, so the run should stop instead of inventing a new click path.",
+    expectation: "Stop and preserve the evidence already captured rather than branching away from the page instructions."
+  });
+}
+
 function buildFallbackDecision(args: {
   suite: TaskSuite;
   taskIndex: number;
@@ -641,163 +852,13 @@ function buildFallbackDecision(args: {
   });
 
   if (nextInstruction) {
-    const matchingField = findMatchingFormField(args.pageState, nextInstruction.instructionQuote);
-    if (matchingField) {
-      const formValue = inferFormFieldValue(matchingField);
-      if (formValue) {
-        const target = resolveFormFieldTarget(matchingField);
-        return {
-          thought: "Model planning was unavailable, but the next unread visible step matches a form field and can be advanced safely with dummy details.",
-          stepNumber: nextInstruction.stepNumber,
-          instructionQuote: nextInstruction.instructionQuote,
-          action: "type",
-          target,
-          text: formValue,
-          expectation: `Fill '${target}' for this single step, then wait for the form state to update before moving on.`,
-          friction: "medium"
-        };
-      }
-    }
-
-    const directInteractiveTarget = findInteractiveTarget(args.pageState, nextInstruction.instructionQuote);
-    if (directInteractiveTarget) {
-      const currentInteractive = args.pageState.interactive.find(
-        (item) => normalizeKey(resolveInteractiveTarget(item)) === normalizeKey(directInteractiveTarget)
-      );
-      const currentScore = currentInteractive
-        ? scoreInteractiveForTask({
-            task,
-            item: currentInteractive,
-            history: args.history
-          })
-        : Number.NEGATIVE_INFINITY;
-
-      if (
-        bestTaskInteractive &&
-        (taskProfile.engagement || taskProfile.gameplay || taskProfile.buttonCoverage) &&
-        normalizeKey(resolveInteractiveTarget(bestTaskInteractive.item)) !== normalizeKey(directInteractiveTarget) &&
-        bestTaskInteractive.score >= 80 &&
-        (isRegressiveTaskControlLabel(directInteractiveTarget) || bestTaskInteractive.score >= currentScore + 35)
-      ) {
-        const target = resolveInteractiveTarget(bestTaskInteractive.item);
-        return buildTaskInteractiveDecision({
-          pageState: args.pageState,
-          item: bestTaskInteractive.item,
-          thought: `Model planning was unavailable, and '${directInteractiveTarget}' would backtrack or undershoot the accepted task, so use the stronger visible control '${target}' instead.`,
-          expectation: `Click '${target}' and verify whether the live experience visibly advances.`,
-          friction: "medium"
-        });
-      }
-
-      return {
-        thought: "Model planning was unavailable, but the next unread visible step directly matches a visible control, so follow it exactly.",
-        stepNumber: nextInstruction.stepNumber,
-        instructionQuote: nextInstruction.instructionQuote,
-        action: "click",
-        target: directInteractiveTarget,
-        text: "",
-        expectation: `Click only '${directInteractiveTarget}' and wait for the page to update before considering any later instruction.`,
-        friction: ACCESS_GATE_PATTERNS.some((pattern) => pattern.test(nextInstruction.instructionQuote)) ? "low" : "medium"
-      };
-    }
-
-    const clickTarget = extractClickTarget(nextInstruction.instructionQuote);
-    if (clickTarget) {
-      return {
-        thought: "Model planning was unavailable, but the next unread visible instruction explicitly names a control, so follow that single step without skipping ahead.",
-        stepNumber: nextInstruction.stepNumber,
-        instructionQuote: nextInstruction.instructionQuote,
-        action: "click",
-        target: clickTarget,
-        text: "",
-        expectation: `Click only '${clickTarget}' and wait for the page to update before considering any later instruction.`,
-        friction: "medium"
-      };
-    }
-
-    const typeTarget = extractTypeTarget(nextInstruction.instructionQuote);
-    if (typeTarget) {
-      const field = findMatchingFormField(args.pageState, typeTarget);
-      const formValue = field ? inferFormFieldValue(field) : null;
-
-      if (field && formValue) {
-        const target = resolveFormFieldTarget(field);
-        return {
-          thought: "Model planning was unavailable, but the next unread visible instruction explicitly asks for form input and a matching field is present.",
-          stepNumber: nextInstruction.stepNumber,
-          instructionQuote: nextInstruction.instructionQuote,
-          action: "type",
-          target,
-          text: formValue,
-          expectation: `Fill '${target}' for this one step and wait for the form to reflect the new value before moving on.`,
-          friction: "medium"
-        };
-      }
-    }
-
-    if (/^(?:step\s+\d+[:.)-]?\s*)?(?:scroll|swipe)\b/i.test(nextInstruction.instructionQuote)) {
-      return {
-        thought: "Model planning was unavailable, but the next unread visible instruction is an explicit scroll step.",
-        stepNumber: nextInstruction.stepNumber,
-        instructionQuote: nextInstruction.instructionQuote,
-        action: "scroll",
-        target: "",
-        text: "",
-        expectation: "Scroll once, then wait for the page to settle before evaluating the next visible instruction.",
-        friction: "low"
-      };
-    }
-
-    if (/^(?:step\s+\d+[:.)-]?\s*)?(?:wait|pause|hold)\b/i.test(nextInstruction.instructionQuote)) {
-      return {
-        thought: "Model planning was unavailable, but the next unread visible instruction explicitly says to wait.",
-        stepNumber: nextInstruction.stepNumber,
-        instructionQuote: nextInstruction.instructionQuote,
-        action: "wait",
-        target: "",
-        text: "",
-        expectation: "Wait briefly, observe the result, and do not execute any later step yet.",
-        friction: "low"
-      };
-    }
-
-    if (/^(?:step\s+\d+[:.)-]?\s*)?(?:go back|back)\b/i.test(nextInstruction.instructionQuote)) {
-      return {
-        thought: "Model planning was unavailable, but the next unread visible instruction explicitly says to go back.",
-        stepNumber: nextInstruction.stepNumber,
-        instructionQuote: nextInstruction.instructionQuote,
-        action: "back",
-        target: "",
-        text: "",
-        expectation: "Go back once and wait for the page update before reading further instructions.",
-        friction: "medium"
-      };
-    }
-
-    return buildStopDecision({
-      thought: "Model planning was unavailable and the next visible instruction cannot be executed safely without guessing, so strict mode requires stopping here.",
-      expectation: "Stop and report that the current step is ambiguous instead of inferring a missing action.",
-      stepNumber: nextInstruction.stepNumber,
-      instructionQuote: nextInstruction.instructionQuote
+    return buildDecisionFromVisibleInstruction({
+      pageState: args.pageState,
+      instruction: nextInstruction
     });
   }
 
   if (pageHasStrictStepContent(args.pageState)) {
-    if (
-      bestTaskInteractive &&
-      (taskProfile.engagement || taskProfile.gameplay || taskProfile.buttonCoverage) &&
-      bestTaskInteractive.score >= 80
-    ) {
-      const target = resolveInteractiveTarget(bestTaskInteractive.item);
-      return buildTaskInteractiveDecision({
-        pageState: args.pageState,
-        item: bestTaskInteractive.item,
-        thought: `Model planning was unavailable, but the accepted task still calls for active engagement and '${target}' is the strongest visible next control.`,
-        expectation: `Click '${target}' and verify whether the main interactive flow visibly responds.`,
-        friction: "medium"
-      });
-    }
-
     return buildStopDecision({
       thought: "Model planning was unavailable and there are no clearly unread actionable steps left on the page.",
       expectation: "Stop rather than inventing a new step or reordering the page instructions."
@@ -892,7 +953,11 @@ export async function decideNextAction(args: {
     return {
       decision: enforceFormFirstDecision({
         pageState: args.pageState,
-        decision: PlannerDecisionSchema.parse(decision)
+        decision: enforceInstructionOrderDecision({
+          pageState: args.pageState,
+          history: args.history,
+          decision: PlannerDecisionSchema.parse(decision)
+        })
       })
     };
   } catch (error) {
