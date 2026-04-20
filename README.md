@@ -1,388 +1,438 @@
 # Site Agent Pro
 
-A production-ready browser agent that tests a website like a normal user and produces a blunt, evidence-based task output.
+> AI-powered browser agent that executes real user tasks on any website, captures step-by-step evidence, and produces scored, actionable reports.
 
-It uses:
-- **Playwright** for browser automation and resilient user-facing locators
-- **OpenAI or Ollama** for agent planning and structured evaluation
-- **axe-core for Playwright** for accessibility checks
-- **sharp** and **node-webpmux** for animated WebP click-replay generation
-- **Netlify Blobs** for serverless artifact and submission storage
-- **@sparticuz/chromium** for Lambda-style serverless Chromium execution
-- **Zod** for runtime schema validation throughout
+**Playwright** · **OpenAI / Ollama** · **axe-core** · **TypeScript** · **Zod**
 
-## What this project does
+---
 
-- Opens a site in Chromium (desktop at 1440×900 or mobile at 390×844 via iPhone 13 profile)
-- Executes realistic task flows from accepted tasks entered on the dashboard or passed with `--task`
-- Limits itself to normal user behavior and visible-page interaction
-- Requires at least one explicit `--task` for every CLI run — there are no built-in fallback task suites
-- Generates an upfront site brief before tasks begin, and refreshes it after a successful auth recovery
-- Detects auth walls mid-run and can attempt automatic signup/login when auth bootstrap is configured
-- Can reuse a legitimate Playwright `storageState` JSON for authenticated or pre-verified test lanes
-- Can bootstrap an authenticated session by filling signup forms, polling a real IMAP inbox for OTP or verification emails, logging in, and saving `storageState`
-- Logs every step, friction point, console error, page error, and failed network request
-- Runs an axe-core accessibility pass on the final page state
-- Runs supplemental site checks (performance timings, SEO crawl, security headers, CRO signals, content readability, mobile layout) after the task loop
-- Produces JSON, HTML, Markdown, and animated WebP click-replay artifacts per run
-- Supports 1–5 concurrent agent perspectives per submission, with an aggregate report across all perspectives
+## How It Works
 
-## Why this design is not trash
+```
+User submits URL + tasks
+        │
+        ▼
+┌─────────────────────────────┐
+│  Chromium launches           │
+│  (desktop 1440×900           │
+│   or mobile 390×844)         │
+└──────────┬──────────────────┘
+           ▼
+┌─────────────────────────────┐
+│  For each task:              │
+│   1. Capture page state      │
+│   2. LLM plans next action   │
+│   3. Playwright executes it  │
+│   4. Repeat until done       │
+└──────────┬──────────────────┘
+           ▼
+┌─────────────────────────────┐
+│  Site checks:                │
+│  SEO · Performance ·         │
+│  Security · Accessibility ·  │
+│  Mobile · Content · CRO      │
+└──────────┬──────────────────┘
+           ▼
+┌─────────────────────────────┐
+│  LLM evaluates the run       │
+│  → Scored report (1-10)      │
+│  → HTML / Markdown / JSON    │
+│  → Click replay animation    │
+└─────────────────────────────┘
+```
 
-Most "AI website reviewers" are fake-polite nonsense because they:
-- let the model roam randomly
-- do not log evidence
-- confuse hidden DOM access with human behavior
-- generate fluffy praise with no proof
+---
 
-This project avoids that by separating the system into:
-- **task execution** — the agent follows only the accepted tasks you provide
-- **structured evidence capture** — every step, click, and page state is logged
-- **independent evaluation** — the evaluator scores from logs and evidence only, not from the agent's own impressions
+## Features
 
-## Quick start
+- **Task-driven execution** — the agent follows only the tasks you provide, nothing more
+- **Step-by-step evidence** — every click, page state, console error, and network failure is logged
+- **Independent evaluation** — the LLM scores from captured evidence, not from the agent's own impressions
+- **Multi-agent perspectives** — run 1–5 agents with different personas on the same site, merged into one report
+- **Auth-aware** — detects login walls mid-run, fills signup forms, polls IMAP for OTP/verification emails
+- **Supplemental audits** — SEO crawl, security headers, performance timings, accessibility (axe-core), CRO signals, content readability, mobile layout
+- **Click replay** — animated WebP of before/after screenshots for every click
+- **Dual LLM support** — OpenAI (GPT-5) for production, Ollama for local/private development
+- **Three deployment modes** — CLI, web dashboard, or Netlify serverless
 
-1. Install dependencies
+---
+
+## Quick Start
+
+### 1. Install
 
 ```bash
 npm install
-```
-
-2. Install Chromium for Playwright
-
-```bash
 npm run browser:install
 ```
 
-3. Create your environment file and choose an LLM provider
+### 2. Configure
 
 ```bash
 cp .env.example .env
-# then either:
-# - keep LLM_PROVIDER=openai and set OPENAI_API_KEY=your_openai_api_key_here
-# - or set LLM_PROVIDER=ollama and choose an installed OLLAMA_MODEL
 ```
 
-4. Run the agent against a site
+Set your LLM provider in `.env`:
 
 ```bash
-npm run dev -- --url https://example.com --task "Open pricing and compare the visible plans before signup"
+# Option A: OpenAI (recommended for production)
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_key_here
+
+# Option B: Ollama (for local/private development)
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=llama3.1:8b
 ```
 
-5. Start the local app
+### 3. Run
 
 ```bash
+# Run the agent against a site
+npm run dev -- --url https://example.com \
+  --task "Open pricing and compare the visible plans before signup"
+
+# Start the web dashboard
 npm run dashboard
+# → http://localhost:4173
 ```
 
-Then open:
-- `http://localhost:4173/` for the public submission form
-- `http://localhost:4173/dashboard` for the internal run dashboard
+### 4. View Results
 
-6. Check the generated artifacts in `runs/<run-id>/`
+Artifacts are saved to `runs/<run-id>/`:
 
-## Product flow
+| File | Contents |
+|---|---|
+| `report.html` | Standalone shareable report |
+| `report.json` | Machine-readable scored report |
+| `report.md` | Markdown report |
+| `task-results.json` | Per-task step history and outcomes |
+| `raw-events.json` | Every browser event, console log, and network request |
+| `accessibility.json` | axe-core violation list |
+| `site-checks.json` | SEO, performance, security, CRO, content, mobile checks |
+| `click-replay.webp` | Animated before/after click screenshots |
+| `inputs.json` | Run configuration and timing metadata |
 
-The local app supports the full submission loop:
-- a public submission form at `/`
-- accepted tasks entered directly on the landing page (required — no tasks, no run)
-- 1 to 5 concurrent agent perspectives per submission
-- a hosted public task output link at `/r/<token>` (valid for 30 days)
-- a status page at `/submissions/<submission-id>`
-- dashboard-first aggregate and per-agent output inspection and downloads at `/dashboard`
-- standalone HTML output pages at `/outputs/<run-id>`
+---
 
-Every run is task-driven. The landing page and CLI accept the task list directly, and the agents use only those accepted tasks to decide where to go, what to click, and how the final output is scored.
-
-For game sites, submit explicit tasks such as reading the visible how-to-play section, reaching a playable state, and playing five rounds while recording wins and losses.
-
-## Netlify deployment
-
-This repo includes a Netlify-oriented runtime:
-- a synchronous Netlify Function (`src/netlify/functions/app.ts`) handling `/`, `/submit`, `/dashboard`, `/submissions/:id`, `/r/:token`, `/outputs/:runId`, `/api/runs`, `/api/runs/:runId`, and `/api/runs/:runId/artifacts/:fileName`
-- a Netlify Background Function (`src/netlify/functions/process-submission-background.ts`) for the long-running audit job
-- Netlify Blobs storage for submissions and run artifacts (auto-selected when `SITE_ID` or `URL` env vars are present)
-
-Build configuration (`netlify.toml`):
-- build command: `npm run build`
-- publish directory: `netlify-static`
-- functions directory: `dist/netlify/functions`
-- Node version: 22
-- `playwright` and `@sparticuz/chromium` are declared as external node modules
-
-Required Netlify environment variables:
-- `OPENAI_API_KEY`
-- `APP_BASE_URL` — set to your production site URL
-
-Recommended Netlify environment variables:
-- `OPENAI_MODEL` — defaults to `gpt-5`
-- `INTERNAL_JOB_SECRET` — restricts background job invocation via the `x-agentprobe-job-secret` header
-
-Notes:
-- The Netlify runtime uses `@sparticuz/chromium` instead of a build-time Playwright browser download. Serverless mode is auto-detected via `USE_SERVERLESS_CHROMIUM=true`, `NETLIFY_LOCAL=true`, `SITE_ID`, or `URL`.
-- You can also set `PLAYWRIGHT_EXECUTABLE_PATH` to point to a specific Chromium binary.
-- Local development still uses the normal Playwright browser flow via `npm run browser:install`.
-- The run cap is 600 seconds end-to-end. The runner reserves part of that wall-clock budget for evaluation and output generation.
-
-## CLI usage
+## CLI Reference
 
 ```bash
-# Basic run with one task
-npm run dev -- --url https://example.com --task "Open pricing and compare the visible plans before signup"
-
-# Local Ollama run
-npm run dev -- --url http://127.0.0.1:3000 --task "Open pricing and compare the visible plans before signup" --llm-provider ollama --model llama3.1:8b
-
-# Switch back to OpenAI for internet-facing runs
-npm run dev -- --url https://example.com --task "Open pricing and compare the visible plans before signup" --llm-provider openai --model gpt-5
-
-# Headed mode
-npm run dev -- --url https://example.com --task "Open pricing and compare the visible plans before signup" --headed
+# Basic single-task run
+npm run dev -- --url https://example.com --task "Click the pricing tab"
 
 # Multiple tasks
-npm run dev -- --url https://example.com --task "Read the visible how-to-play section" --task "Play the game five times and record each win or loss"
+npm run dev -- --url https://example.com \
+  --task "Read the visible how-to-play section" \
+  --task "Play the game five times and record each win or loss"
 
-# Mobile viewport (390×844, iPhone 13 profile)
-npm run dev -- --url https://example.com --task "Check the mobile nav and reach the contact page" --mobile
+# Mobile viewport (iPhone 13, 390×844)
+npm run dev -- --url https://example.com --task "Check the mobile nav" --mobile
 
-# Allow self-signed or invalid HTTPS certificates
+# Headed mode (visible browser)
+npm run dev -- --url https://example.com --task "Open pricing" --headed
+
+# Ollama for local sites
+npm run dev -- --url http://127.0.0.1:3000 --task "Check the homepage CTA" \
+  --llm-provider ollama --model llama3.1:8b
+
+# Allow self-signed HTTPS certificates
 npm run dev -- --url https://localhost:3000 --task "Check the homepage" --ignore-https-errors
-
-# Load a saved Playwright storage state
-npm run dev -- --url https://example.com --task "Reach the dashboard home after login" --storage-state .auth/session.json
-
-# Load and save storage state after the run
-npm run dev -- --url https://example.com --task "Reach the dashboard home after login" --storage-state .auth/session.json --save-storage-state .auth/session.json
-
-# Auth bootstrap then run tasks
-npm run dev -- --url https://example.com --task "Reach the account dashboard and confirm billing is visible" --auth-flow --signup-url /register --login-url /login --access-url /app
-
-# Auth bootstrap only — save session, skip task run
-npm run dev -- --url https://example.com --auth-only --signup-url /register --login-url /login --access-url /app
 ```
 
-## Auth bootstrap
+> **Note:** Every CLI run requires at least one `--task` flag. Runs with no tasks are rejected.
 
-When you want the agent to create or verify a test account itself, use `--auth-flow`.
+### All CLI Options
 
-What it does:
-- fills visible signup fields with your configured test identity (`AUTH_TEST_EMAIL`, `AUTH_TEST_PASSWORD`, etc.)
-- uses the same configured email for signup and login
-- polls the configured IMAP inbox for a new OTP or verification email
-- submits the OTP or opens the verification link
-- logs in with the same credentials
-- checks a protected page if you provide `--access-url`
-- saves the authenticated Playwright session to `AUTH_SESSION_STATE_PATH`, `PLAYWRIGHT_STORAGE_STATE_PATH`, or `.auth/session.json`
-- writes an `auth-flow.json` artifact to the run directory
+| Flag | Description |
+|---|---|
+| `--url <url>` | **(Required)** Website URL to test |
+| `--task <task>` | **(Required)** Task for the agent. Repeat for multiple tasks |
+| `--headed` | Run browser in headed (visible) mode |
+| `--mobile` | Use iPhone 13 mobile viewport |
+| `--ignore-https-errors` | Allow invalid or self-signed HTTPS certificates |
+| `--llm-provider <name>` | LLM provider: `openai` or `ollama` |
+| `--model <name>` | Override the model name |
+| `--ollama-base-url <url>` | Override the Ollama endpoint |
+| `--storage-state <path>` | Load Playwright storage state JSON before the run |
+| `--save-storage-state <path>` | Save Playwright storage state JSON after the run |
+| `--auth-flow` | Bootstrap a test account (signup/login/OTP), then run tasks |
+| `--auth-only` | Bootstrap a test account and save session — skip task run |
+| `--signup-url <url>` | Signup page URL (absolute or relative) |
+| `--login-url <url>` | Login page URL (absolute or relative) |
+| `--access-url <url>` | Protected page URL to verify after login |
 
-The auth bootstrap also runs automatically mid-task if `AUTH_TEST_EMAIL` and `AUTH_TEST_PASSWORD` are set and an auth wall is detected during a task run.
+---
 
-Example:
-
-```bash
-npm run dev -- --url https://example.com --auth-flow --signup-url /register --login-url /login --access-url /dashboard --headed
-```
-
-If you only want a reusable authenticated session file and not the task run:
-
-```bash
-npm run dev -- --url https://example.com --auth-only --signup-url /register --login-url /login --access-url /dashboard
-```
-
-The auth bootstrap uses IMAP mailbox access (`imapflow` + `mailparser`), not a browser-driven Gmail or Outlook tab. That makes the OTP and verification step much more reliable for test lanes.
-
-Required auth environment variables (when `--auth-flow` or `--auth-only` is used):
-- `AUTH_TEST_EMAIL`
-- `AUTH_TEST_PASSWORD`
-
-Optional auth environment variables:
-- `AUTH_TEST_FIRST_NAME`, `AUTH_TEST_LAST_NAME`, `AUTH_TEST_PHONE`
-- `AUTH_TEST_ADDRESS_LINE1`, `AUTH_TEST_ADDRESS_LINE2`, `AUTH_TEST_CITY`, `AUTH_TEST_STATE`, `AUTH_TEST_POSTAL_CODE`, `AUTH_TEST_COUNTRY`, `AUTH_TEST_COMPANY`
-- `AUTH_IMAP_HOST`, `AUTH_IMAP_PORT` (default: 993), `AUTH_IMAP_SECURE` (default: true), `AUTH_IMAP_USER`, `AUTH_IMAP_PASSWORD`, `AUTH_IMAP_MAILBOX` (default: INBOX)
-- `AUTH_EMAIL_POLL_TIMEOUT_MS` (default: 180000), `AUTH_EMAIL_POLL_INTERVAL_MS` (default: 5000)
-- `AUTH_OTP_LENGTH` (default: 6), `AUTH_EMAIL_FROM_FILTER`, `AUTH_EMAIL_SUBJECT_FILTER`
-- `AUTH_SIGNUP_URL`, `AUTH_LOGIN_URL`, `AUTH_ACCESS_URL` (can be set in `.env` instead of passing CLI flags)
-- `AUTH_SESSION_STATE_PATH` — where to save the authenticated session JSON
-
-## LLM provider switching
-
-The agent supports both OpenAI and Ollama.
-
-Environment variables:
-- `LLM_PROVIDER` — `openai` or `ollama`
-- `OPENAI_API_KEY` — required only when using `openai`
-- `OPENAI_MODEL` — defaults to `gpt-5`
-- `OLLAMA_BASE_URL` — defaults to `http://127.0.0.1:11434`
-- `OLLAMA_MODEL` — defaults to `llama3.1:8b`
-
-CLI overrides:
-- `--llm-provider openai|ollama`
-- `--model <name>`
-- `--ollama-base-url <url>`
-
-Examples:
-
-```bash
-# Use Ollama against a local site
-npm run dev -- --url http://127.0.0.1:3000 --task "Check the homepage CTA" --llm-provider ollama --model llama3.1:8b
-
-# Use OpenAI against a public site
-npm run dev -- --url https://example.com --task "Open pricing" --llm-provider openai --model gpt-5
-```
-
-Notes:
-- Ollama is most useful for local development and private staging pages where you do not want to depend on OpenAI.
-- Netlify or other hosted environments will still need a reachable LLM endpoint. Ollama is only a good fit there if that runtime can actually reach your Ollama host.
-
-## Legitimate session reuse
-
-For sites that are only reachable after a real verified session, the runner can load a Playwright `storageState` JSON instead of trying to bypass the security layer.
-
-Use one of these paths:
-- set `PLAYWRIGHT_STORAGE_STATE_PATH=.auth/session.json` in `.env` so the CLI and local app reuse the same approved session automatically
-- pass `--storage-state .auth/session.json` for a single CLI run
-- pass `--save-storage-state .auth/session.json` when you want the CLI run to persist the updated session after it finishes
-
-Example:
-
-```bash
-npm run dev -- --url https://example.com --task "Reach the account dashboard" --storage-state .auth/session.json --headed
-```
-
-This is for legitimate authenticated or pre-cleared test lanes. It does not solve CAPTCHA, MFA, or other anti-bot checks on its own.
-
-## Dashboard usage
+## Web Dashboard
 
 ```bash
 npm run dashboard
 ```
 
-The dashboard server runs on `http://localhost:4173` by default. Override with `DASHBOARD_PORT` and `DASHBOARD_HOST` environment variables.
+| URL | Purpose |
+|---|---|
+| `http://localhost:4173/` | Public submission form — enter URL + tasks |
+| `http://localhost:4173/dashboard` | Internal run dashboard — inspect all results |
+| `/submissions/<id>` | Submission progress tracking |
+| `/r/<token>` | Public shareable report link (valid 30 days) |
+| `/outputs/<run-id>` | Standalone HTML report for any run |
+| `/api/runs` | REST API — list all runs |
+| `/api/runs/<id>` | REST API — run detail |
 
-The dashboard:
-- lists saved single runs and aggregate multi-agent runs from `runs/`
-- shows overall scores and task-output summaries
-- surfaces the per-agent breakdown for aggregate runs
-- displays strengths, weaknesses, and top fixes
-- lets you inspect task evidence and per-step interaction logs
-- surfaces saved accessibility findings
-- links to a standalone HTML output page for each run at `/outputs/<run-id>`
-- serves artifact downloads (JSON, Markdown, HTML, WebP click replay) at `/api/runs/:runId/artifacts/:fileName`
+The dashboard supports:
+- 1–5 concurrent agent perspectives per submission
+- Aggregate and per-agent report inspection
+- Artifact downloads (JSON, Markdown, HTML, WebP click replay)
+- Strengths, weaknesses, and top fix recommendations
 
-The public app:
-- accepts a URL submission plus accepted tasks at `/`
-- requires at least one task — submissions with no tasks are rejected
-- lets you choose between 1 and 5 concurrent agent perspectives
-- serves unique public task output links for 30 days at `/r/<token>`
-- shows submission progress at `/submissions/<submission-id>`
-- lets you download both aggregate and per-agent outputs directly from the dashboard
+---
 
-## Configuration reference
+## Authentication
 
-All configuration is read from environment variables (via `.env`).
+The agent can bootstrap authenticated sessions for sites that require signup/login.
+
+### Quick Example
+
+```bash
+npm run dev -- --url https://example.com \
+  --task "Reach the account dashboard and confirm billing is visible" \
+  --auth-flow --signup-url /register --login-url /login --access-url /app
+```
+
+### What Auth Bootstrap Does
+
+1. Fills visible signup fields with your configured test identity
+2. Polls your IMAP inbox for OTP or verification emails
+3. Submits the OTP code or opens the verification link
+4. Logs in with the same credentials
+5. Verifies a protected page (if `--access-url` is provided)
+6. Saves the authenticated session to `.auth/session.json`
+
+Auth walls detected mid-task are handled automatically when `AUTH_TEST_EMAIL` and `AUTH_TEST_PASSWORD` are configured.
+
+### Auth-Only Mode
+
+Save an authenticated session without running tasks:
+
+```bash
+npm run dev -- --url https://example.com --auth-only \
+  --signup-url /register --login-url /login --access-url /dashboard
+```
+
+### Session Reuse
+
+For sites behind verified sessions, load a saved Playwright storage state:
+
+```bash
+# Via CLI flag
+npm run dev -- --url https://example.com --task "Reach the dashboard" \
+  --storage-state .auth/session.json
+
+# Via .env (auto-loaded on every run)
+PLAYWRIGHT_STORAGE_STATE_PATH=.auth/session.json
+```
+
+> **Important:** This does not bypass CAPTCHA, MFA, or anti-bot controls. It reuses legitimate sessions you've established.
+
+### Auth Environment Variables
+
+**Required** (when using `--auth-flow` or `--auth-only`):
+
+| Variable | Description |
+|---|---|
+| `AUTH_TEST_EMAIL` | Email address for signup/login |
+| `AUTH_TEST_PASSWORD` | Password for signup/login |
+
+**IMAP inbox** (for OTP/verification email polling):
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENAI_API_KEY` | required | OpenAI API key |
-| `OPENAI_MODEL` | `gpt-5` | Model used for planning and evaluation |
-| `APP_BASE_URL` | — | Base URL for the deployed app (used in public report links) |
-| `HEADLESS` | `true` | Set to `false` to run the browser in headed mode by default |
-| `MAX_SESSION_DURATION_MS` | `600000` | Total run wall-clock cap in milliseconds (clamped to 60s–600s) |
-| `MAX_STEPS_PER_TASK` | `32` | Maximum steps the agent takes per task |
-| `ACTION_DELAY_MS` | `600` | Delay between actions in milliseconds |
-| `NAVIGATION_TIMEOUT_MS` | `25000` | Playwright navigation and action timeout |
-| `REPORT_TTL_DAYS` | `30` | How long public report links remain valid |
-| `PLAYWRIGHT_STORAGE_STATE_PATH` | — | Path to a Playwright storage state JSON to load automatically |
-| `PLAYWRIGHT_EXECUTABLE_PATH` | — | Path to a specific Chromium binary |
-| `USE_SERVERLESS_CHROMIUM` | — | Set to `true` to force `@sparticuz/chromium` |
-| `SPARTICUZ_CHROMIUM_LOCATION` | — | Optional location hint for `@sparticuz/chromium` |
-| `DASHBOARD_PORT` | `4173` | Port for the local dashboard server |
-| `DASHBOARD_HOST` | `127.0.0.1` | Host for the local dashboard server |
-| `INTERNAL_JOB_SECRET` | — | Secret for restricting background job invocation |
+| `AUTH_IMAP_HOST` | — | IMAP server hostname |
+| `AUTH_IMAP_PORT` | `993` | IMAP port |
+| `AUTH_IMAP_SECURE` | `true` | Use TLS |
+| `AUTH_IMAP_USER` | — | IMAP username |
+| `AUTH_IMAP_PASSWORD` | — | IMAP password |
+| `AUTH_IMAP_MAILBOX` | `INBOX` | Mailbox to poll |
 
-## Coverage tuning
+**Optional identity fields:**
 
-Because the run follows only accepted tasks, write the task list as focused coverage lanes instead of one giant "explore everything" instruction:
-- map the main journey
-- inspect discovery paths
-- follow the conversion and trust path
-- probe suspicious and recovery states
+`AUTH_TEST_FIRST_NAME` · `AUTH_TEST_LAST_NAME` · `AUTH_TEST_PHONE` · `AUTH_TEST_ADDRESS_LINE1` · `AUTH_TEST_ADDRESS_LINE2` · `AUTH_TEST_CITY` · `AUTH_TEST_STATE` · `AUTH_TEST_POSTAL_CODE` · `AUTH_TEST_COUNTRY` · `AUTH_TEST_COMPANY`
 
-That improves section quality without letting early clicks consume the whole run budget.
+**Optional tuning:**
 
-If you want to minimize `blocked` metrics in the task outputs:
-- keep `MAX_SESSION_DURATION_MS` near the 600-second cap
-- raise `NAVIGATION_TIMEOUT_MS` for slow sites before raising step counts
-- reuse a legitimate `storageState` for authenticated or challenge-gated paths
-- prefer QA lanes that do not trigger CAPTCHA, Cloudflare, or geo/IP blocks
-- use more than one agent perspective when you want broader coverage, not just deeper repetition
+| Variable | Default | Description |
+|---|---|---|
+| `AUTH_EMAIL_POLL_TIMEOUT_MS` | `180000` | Max wait time for verification email |
+| `AUTH_EMAIL_POLL_INTERVAL_MS` | `5000` | Poll frequency |
+| `AUTH_OTP_LENGTH` | `6` | Expected OTP digit count |
+| `AUTH_EMAIL_FROM_FILTER` | — | Filter emails by sender |
+| `AUTH_EMAIL_SUBJECT_FILTER` | — | Filter emails by subject |
+| `AUTH_SIGNUP_URL` | — | Default signup URL (instead of CLI flag) |
+| `AUTH_LOGIN_URL` | — | Default login URL |
+| `AUTH_ACCESS_URL` | — | Default protected page URL |
+| `AUTH_SESSION_STATE_PATH` | `.auth/session.json` | Where to save the session |
 
-## Output files
+---
 
-Each run produces a timestamped directory inside `runs/` with:
-- `inputs.json` — run configuration, persona, accepted tasks, and timing metadata
-- `raw-events.json` — every browser event, console log, page error, and failed request
-- `task-results.json` — per-task step history and outcome
-- `accessibility.json` — axe-core violation list
-- `site-checks.json` — supplemental checks: performance timings, SEO crawl, security headers, CRO signals, content readability, mobile layout
-- `report.json` — final scored report with strengths, weaknesses, and top fixes
-- `report.html` — standalone HTML report
-- `report.md` — Markdown report
-- `click-replay.webp` — animated WebP of before/after screenshots for each click step (when screenshots are available)
+## Configuration
 
-When auth bootstrap is enabled, the same run directory also includes:
-- `auth-flow.json`
+All settings are read from environment variables (`.env` file).
 
-Submissions are stored in `submissions/` so the local server can track queue state, public output tokens, and expiry.
+### Core Settings
 
-The dashboard reads these same artifacts directly, so you can inspect old runs without rerunning the agent.
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_PROVIDER` | `openai` | LLM backend: `openai` or `ollama` |
+| `OPENAI_API_KEY` | — | **(Required for OpenAI)** API key |
+| `OPENAI_MODEL` | `gpt-5` | Model for planning and evaluation |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama server URL |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Ollama model name |
 
-## High-level architecture
+### Execution Limits
 
-1. **CLI** (`src/cli/run.ts`) — parses flags, validates tasks, and calls `runAuditJob` or `runAuthFlow`.
-2. **Auth runner** (`src/auth/runner.ts`) — handles signup, IMAP polling, OTP submission, login, and session save.
-3. **Audit job** (`src/core/runAuditJob.ts`) — orchestrates the full run: calls `runTaskSuite`, generates the click replay, calls `evaluateRun`, and writes all artifacts.
-4. **Runner** (`src/core/runner.ts`) — launches Playwright, navigates to the site, derives a site brief, loops over tasks, and calls the planner and executor for each step.
-5. **Planner** (`src/core/planner.ts`) — asks the model for the next realistic user action given the current page state and task history.
-6. **Executor** (`src/core/executor.ts`) — performs the decided action with guarded locator strategies and captures before/after screenshots.
-7. **Page state** (`src/core/pageState.ts`) — captures visible text, actionable elements, and page signals.
-8. **Site checks** (`src/core/siteChecks.ts`) — runs supplemental probes for performance, SEO, security headers, CRO, content readability, and mobile layout after the task loop.
-9. **Audit** (`src/core/audit.ts`) — runs axe-core accessibility checks.
-10. **Evaluator** (`src/core/evaluator.ts`) — scores the site from task results, raw events, and accessibility findings using the OpenAI structured output API.
-11. **Click replay** (`src/reporting/clickReplay.ts`) — assembles before/after screenshots into an annotated animated WebP using `sharp` and `node-webpmux`.
-12. **Output writers** (`src/reporting/html.ts`, `src/reporting/markdown.ts`) — render machine-readable and human-readable task outputs.
-13. **Aggregate report** (`src/core/aggregateReport.ts`) — merges results from multiple agent perspectives into a single scored report.
-14. **Submission batch** (`src/core/processSubmissionBatch.ts`) — runs 1–5 agent variants in parallel and produces the aggregate.
-15. **Dashboard server** (`src/dashboard/server.ts`) — local HTTP server serving the submission form, status pages, dashboard UI, and artifact downloads.
-16. **Netlify app** (`src/netlify/app.ts`) — Netlify Function handler for the same routes.
-17. **Storage** (`src/netlify/storage.ts`) — dual-mode storage layer: local filesystem for development, Netlify Blobs for production.
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_SESSION_DURATION_MS` | `600000` | Total run time cap (clamped 60s–600s) |
+| `MAX_STEPS_PER_TASK` | `32` | Max actions per task |
+| `ACTION_DELAY_MS` | `600` | Delay between actions (human-like pacing) |
+| `NAVIGATION_TIMEOUT_MS` | `25000` | Page load timeout |
 
-## Important constraints
+### Browser
 
-- This project does **not** bypass CAPTCHA, MFA, or anti-bot controls.
-- This project can reuse a real Playwright session state when you provide one through approved means.
-- This project can read OTP or verification emails only when you provide legitimate IMAP inbox credentials for the same mailbox.
-- This project does **not** pretend hidden elements are visible to users.
-- This project does **not** claim certainty when it lacks evidence.
-- Every CLI run requires at least one `--task` flag. Runs with no tasks are rejected.
+| Variable | Default | Description |
+|---|---|---|
+| `HEADLESS` | `true` | Set `false` for headed mode |
+| `PLAYWRIGHT_STORAGE_STATE_PATH` | — | Auto-load session state JSON |
+| `PLAYWRIGHT_EXECUTABLE_PATH` | — | Custom Chromium binary path |
+| `USE_SERVERLESS_CHROMIUM` | — | Force `@sparticuz/chromium` |
+| `SPARTICUZ_CHROMIUM_LOCATION` | — | Chromium binary location hint |
 
-## Step-by-step documentation
+### Dashboard & Deployment
 
-Read these in order:
-- `docs/01-installation.md`
-- `docs/02-running-your-first-audit.md`
-- `docs/03-configuration.md`
-- `docs/04-how-the-agent-thinks.md`
-- `docs/05-extending-personas-and-tasks.md`
-- `docs/06-hardening-for-production.md`
+| Variable | Default | Description |
+|---|---|---|
+| `APP_BASE_URL` | — | Production URL for public report links |
+| `DASHBOARD_PORT` | `4173` | Dashboard server port |
+| `DASHBOARD_HOST` | `127.0.0.1` | Dashboard server host |
+| `REPORT_TTL_DAYS` | `30` | Public report link expiry |
+| `INTERNAL_JOB_SECRET` | — | Restrict background job invocation |
 
-## Recommended rollout path
+---
 
-Start here:
-- run it manually on desktop
-- inspect logs and task outputs
-- tune tasks for your product category
-- add mobile runs
-- add CI later
+## Writing Effective Tasks
 
-Do **not** dump it straight into CI and assume the scores mean truth. That would be lazy and dumb.
+Since the agent follows only your tasks, structure them as focused coverage lanes:
+
+```bash
+# Map the main journey
+--task "Navigate to pricing and compare the monthly vs yearly plans"
+
+# Inspect discovery paths
+--task "Use the site search to find 'refund policy' and read the visible result"
+
+# Follow the conversion path
+--task "Click the Sign Up Free tab, fill every visible detail, and submit"
+
+# Probe edge cases
+--task "Enter an invalid email in the signup form and check the error message"
+```
+
+**Tips for better results:**
+- Write **specific, concrete actions** — not "explore the site"
+- Split large journeys into **separate tasks** so early clicks don't consume the entire budget
+- For slow sites, increase `NAVIGATION_TIMEOUT_MS` before increasing step counts
+- Use `--storage-state` for pages behind authentication
+- Run **multiple agent perspectives** (2-5) when you want broader coverage
+- For game sites, be explicit: "Play 5 rounds and record each win or loss"
+
+---
+
+## Netlify Deployment
+
+This repo includes a Netlify-ready runtime:
+
+- **Synchronous Function** (`src/netlify/functions/app.ts`) — handles all dashboard routes
+- **Background Function** (`src/netlify/functions/process-submission-background.ts`) — long-running audit jobs
+- **Netlify Blobs** — storage for submissions and run artifacts (auto-detected via `SITE_ID` or `URL` env vars)
+- **@sparticuz/chromium** — serverless Chromium (replaces Playwright's browser download)
+
+### Build Configuration (`netlify.toml`)
+
+| Setting | Value |
+|---|---|
+| Build command | `npm run build` |
+| Publish directory | `netlify-static` |
+| Functions directory | `dist/netlify/functions` |
+| Node version | 22 |
+| External modules | `playwright`, `@sparticuz/chromium` |
+
+### Required Environment Variables
+
+| Variable | Description |
+|---|---|
+| `OPENAI_API_KEY` | OpenAI API key |
+| `APP_BASE_URL` | Your production site URL |
+
+### Optional Environment Variables
+
+| Variable | Description |
+|---|---|
+| `OPENAI_MODEL` | Defaults to `gpt-5` |
+| `INTERNAL_JOB_SECRET` | Restricts background job invocation via `x-agentprobe-job-secret` header |
+
+> **Note:** Serverless mode is auto-detected via `USE_SERVERLESS_CHROMIUM=true`, `NETLIFY_LOCAL=true`, `SITE_ID`, or `URL`. The total run cap is 600 seconds, with part reserved for evaluation and report generation.
+
+---
+
+## Architecture
+
+For a detailed technical breakdown of every module, see [**ARCHITECTURE.md**](ARCHITECTURE.md).
+
+High-level summary:
+
+| Layer | Key Files | Purpose |
+|---|---|---|
+| **Entry points** | `cli/run.ts`, `dashboard/server.ts`, `netlify/` | CLI, web UI, serverless |
+| **Orchestration** | `runAuditJob.ts`, `processSubmissionBatch.ts` | Single-run and multi-agent execution |
+| **Agent loop** | `runner.ts` → `planner.ts` → `executor.ts` | Capture state → LLM plans → Playwright acts |
+| **Page understanding** | `pageState.ts`, `siteBrief.ts`, `taskDirectives.ts` | DOM snapshots, site comprehension, instruction parsing |
+| **Authentication** | `auth/profile.ts`, `auth/inbox.ts`, `auth/runner.ts` | Identity management, IMAP OTP polling, login flows |
+| **Evaluation** | `evaluator.ts`, `aggregateReport.ts` | LLM scoring, multi-agent result merging |
+| **Site checks** | `siteChecks.ts`, `audit.ts` | SEO, performance, security, accessibility |
+| **Reporting** | `reporting/html.ts`, `reporting/markdown.ts`, `clickReplay.ts` | HTML/MD/JSON reports, click replay animation |
+| **LLM** | `llm/client.ts`, `prompts/browserAgent.ts`, `prompts/reviewer.ts` | OpenAI + Ollama client, system prompts |
+
+---
+
+## Important Constraints
+
+- **No CAPTCHA/MFA bypass** — the agent does not solve CAPTCHAs, MFA challenges, or anti-bot controls
+- **No hidden DOM access** — the agent interacts only with visible elements, like a real user
+- **No unsupported claims** — the evaluator scores from evidence only, not from the agent's impressions
+- **Task-required** — every run must have at least one explicit task
+- **Legitimate sessions only** — storage state reuse is for approved, pre-established sessions
+
+---
+
+## Step-by-Step Guides
+
+| Guide | Topic |
+|---|---|
+| `docs/01-installation.md` | Installation and setup |
+| `docs/02-running-your-first-audit.md` | Your first run |
+| `docs/03-configuration.md` | Configuration deep-dive |
+| `docs/04-how-the-agent-thinks.md` | Agent planning internals |
+| `docs/05-extending-personas-and-tasks.md` | Custom personas and tasks |
+| `docs/06-hardening-for-production.md` | Production deployment |
+
+---
+
+## Recommended Rollout
+
+1. **Start local** — run manually on desktop, inspect logs and reports
+2. **Tune tasks** — write focused coverage lanes for your product
+3. **Add mobile** — include `--mobile` runs
+4. **Multi-agent** — use 2-5 perspectives for broader coverage
+5. **CI integration** — only after you've validated the scores match your expectations
+
+> Treat the scores as **signals, not ground truth** until you've calibrated them against your own quality bar.
