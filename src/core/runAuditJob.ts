@@ -1,6 +1,7 @@
 import type { TaskSuite } from "../schemas/types.js";
 import path from "node:path";
-import { clampRunDurationMs, config, deriveBrowserExecutionBudgetMs, deriveReportingReserveMs } from "../config.js";
+import { getAccessIdentityLabel, runWithAccessIdentityContext, type AccessIdentityContext } from "../auth/profile.js";
+import { clampRunDurationMs, config, deriveBrowserExecutionBudgetMs, deriveReportingReserveMs, resolveLlmRuntime, type LlmProvider } from "../config.js";
 import { evaluateRun } from "./evaluator.js";
 import { runTaskSuite } from "./runner.js";
 import { generateClickReplay } from "../reporting/clickReplay.js";
@@ -26,6 +27,9 @@ export async function runAuditJob(options: {
   storageStatePath?: string | undefined;
   saveStorageStatePath?: string | undefined;
   maxSessionDurationMs?: number;
+  llmProvider?: LlmProvider;
+  model?: string;
+  ollamaBaseUrl?: string;
   extraInputs?: Record<string, unknown>;
 }): Promise<{
   startedAt: string;
@@ -33,141 +37,167 @@ export async function runAuditJob(options: {
   report: Awaited<ReturnType<typeof evaluateRun>>;
   execution: Awaited<ReturnType<typeof runTaskSuite>>;
 }> {
-  const suite = options.suiteOverride;
-  const runDir = options.runDir ?? resolveRunDir(options.baseUrl);
-  ensureDir(runDir);
-  const inputsPath = path.join(runDir, "inputs.json");
-  const startedAt = new Date().toISOString();
-  const startedAtMs = Date.now();
-  const requestedMaxSessionDurationMs = options.maxSessionDurationMs ?? config.maxSessionDurationMs;
-  const maxRunDurationMs = clampRunDurationMs(requestedMaxSessionDurationMs);
-  const browserExecutionBudgetMs = deriveBrowserExecutionBudgetMs(maxRunDurationMs);
-  const reportingReserveMs = deriveReportingReserveMs(maxRunDurationMs);
-  const storageStatePath = options.storageStatePath ?? config.playwrightStorageStatePath;
-  const saveStorageStatePath = options.saveStorageStatePath;
-  const instructionText =
-    typeof options.extraInputs?.instructionText === "string"
-      ? options.extraInputs.instructionText
-      : suite.tasks.map((task) => task.goal).join("\n");
-  const baseInputs = {
-    baseUrl: options.baseUrl,
-    persona: suite.persona.name,
-    headed: Boolean(options.headed),
-    mobile: Boolean(options.mobile),
-    ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
-    storageStateLoaded: Boolean(storageStatePath),
-    storageStateSource: storageStatePath ? summarizeSessionPath(storageStatePath) : null,
-    saveStorageStateRequested: Boolean(saveStorageStatePath),
-    saveStorageStateTarget: saveStorageStatePath ? summarizeSessionPath(saveStorageStatePath) : null,
-    model: config.model,
-    startedAt,
-    maxRunDurationMs,
-    maxRunDurationSeconds: Math.round(maxRunDurationMs / 1000),
-    browserExecutionBudgetMs,
-    reportingReserveMs,
-    maxRunDurationClamped: maxRunDurationMs !== requestedMaxSessionDurationMs,
-    deviceTimezone: config.deviceTimezone,
-    synchronizedTimezone: config.deviceTimezone,
-    customTasks: suite.tasks.map((task) => task.goal),
-    ...(options.extraInputs ?? {})
+  const accessIdentityContext: AccessIdentityContext = {
+    ...(typeof options.extraInputs?.agentIndex === "number" ? { agentIndex: options.extraInputs.agentIndex } : {}),
+    ...(typeof options.extraInputs?.agentLabel === "string" ? { agentLabel: options.extraInputs.agentLabel } : {}),
+    ...(typeof options.extraInputs?.agentProfileLabel === "string"
+      ? { agentProfileLabel: options.extraInputs.agentProfileLabel }
+      : {})
   };
 
-  writeJson(inputsPath, baseInputs);
-
-  const execution = await runTaskSuite({
-    baseUrl: options.baseUrl,
-    suite,
-    runDir,
-    headed: Boolean(options.headed),
-    mobile: Boolean(options.mobile),
-    ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
-    storageStatePath,
-    saveStorageStatePath,
-    maxSessionDurationMs: browserExecutionBudgetMs
-  });
-
-  let clickReplayArtifact: string | null = null;
-  let clickReplayFrameCount: number | null = null;
-  let clickReplayDurationMs: number | null = null;
-
-  try {
-    const clickReplay = await generateClickReplay({
-      runDir,
-      taskResults: execution.taskResults
+  return await runWithAccessIdentityContext(accessIdentityContext, async () => {
+    const suite = options.suiteOverride;
+    const runDir = options.runDir ?? resolveRunDir(options.baseUrl);
+    ensureDir(runDir);
+    const inputsPath = path.join(runDir, "inputs.json");
+    const startedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    const requestedMaxSessionDurationMs = options.maxSessionDurationMs ?? config.maxSessionDurationMs;
+    const maxRunDurationMs = clampRunDurationMs(requestedMaxSessionDurationMs);
+    const browserExecutionBudgetMs = deriveBrowserExecutionBudgetMs(maxRunDurationMs);
+    const reportingReserveMs = deriveReportingReserveMs(maxRunDurationMs);
+    const llmRuntime = resolveLlmRuntime({
+      ...(options.llmProvider ? { provider: options.llmProvider } : {}),
+      ...(options.model ? { model: options.model } : {}),
+      ...(options.ollamaBaseUrl ? { ollamaBaseUrl: options.ollamaBaseUrl } : {})
     });
-    clickReplayArtifact = clickReplay?.artifactName ?? null;
-    clickReplayFrameCount = clickReplay?.frameCount ?? null;
-    clickReplayDurationMs = clickReplay?.durationMs ?? null;
-  } catch {
-    // Replay generation is optional and should never block the main report.
-  }
-
-  writeJson(inputsPath, {
-    ...baseInputs,
-    ...(execution.siteBrief ? { siteBrief: execution.siteBrief } : {}),
-    browserTimezone: execution.browserTimezone,
-    synchronizedTimezone: execution.browserTimezone || execution.deviceTimezone,
-    ...(clickReplayArtifact ? { clickReplayArtifact } : {}),
-    ...(clickReplayFrameCount !== null ? { clickReplayFrameCount } : {}),
-    ...(clickReplayDurationMs !== null ? { clickReplayDurationMs } : {})
-  });
-
-  const remainingEvaluationBudgetMs = Math.max(0, maxRunDurationMs - (Date.now() - startedAtMs));
-  const report = await evaluateRun({
-    baseUrl: options.baseUrl,
-    suite,
-    siteBrief: execution.siteBrief,
-    taskResults: execution.taskResults,
-    rawEvents: execution.rawEvents,
-    accessibility: execution.accessibility,
-    mobile: Boolean(options.mobile),
-    timeoutMs: remainingEvaluationBudgetMs,
-    totalRunDurationMs: maxRunDurationMs
-  });
-
-  writeJson(path.join(runDir, "report.json"), report);
-  writeText(
-    path.join(runDir, "report.html"),
-    renderHtmlReport({
-      website: options.baseUrl,
+    const storageStatePath = options.storageStatePath ?? config.playwrightStorageStatePath;
+    const saveStorageStatePath = options.saveStorageStatePath;
+    const instructionText =
+      typeof options.extraInputs?.instructionText === "string"
+        ? options.extraInputs.instructionText
+        : suite.tasks.map((task) => task.goal).join("\n");
+    const accessIdentityName = getAccessIdentityLabel(accessIdentityContext);
+    const baseInputs = {
+      baseUrl: options.baseUrl,
       persona: suite.persona.name,
-      acceptedTasks: suite.tasks.map((task) => task.goal),
-      instructionText,
-      report,
-      taskResults: execution.taskResults,
-      accessibility: execution.accessibility,
-      siteChecks: execution.siteChecks,
-      siteBrief: execution.siteBrief,
-      rawEvents: execution.rawEvents,
-      runId: path.basename(runDir),
-      startedAt,
+      headed: Boolean(options.headed),
       mobile: Boolean(options.mobile),
-      timeZone: execution.browserTimezone || execution.deviceTimezone
-    })
-  );
-  writeText(
-    path.join(runDir, "report.md"),
-    renderMarkdownReport({
-      website: options.baseUrl,
-      persona: suite.persona.name,
-      acceptedTasks: suite.tasks.map((task) => task.goal),
-      instructionText,
-      report,
-      taskResults: execution.taskResults,
-      accessibility: execution.accessibility,
-      siteChecks: execution.siteChecks,
-      siteBrief: execution.siteBrief,
-      rawEvents: execution.rawEvents,
+      ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
+      llmProvider: llmRuntime.provider,
+      storageStateLoaded: Boolean(storageStatePath),
+      storageStateSource: storageStatePath ? summarizeSessionPath(storageStatePath) : null,
+      saveStorageStateRequested: Boolean(saveStorageStatePath),
+      saveStorageStateTarget: saveStorageStatePath ? summarizeSessionPath(saveStorageStatePath) : null,
+      model: llmRuntime.model,
       startedAt,
-      mobile: Boolean(options.mobile),
-      timeZone: execution.browserTimezone || execution.deviceTimezone
-    })
-  );
+      maxRunDurationMs,
+      maxRunDurationSeconds: Math.round(maxRunDurationMs / 1000),
+      browserExecutionBudgetMs,
+      reportingReserveMs,
+      maxRunDurationClamped: maxRunDurationMs !== requestedMaxSessionDurationMs,
+      deviceTimezone: config.deviceTimezone,
+      synchronizedTimezone: config.deviceTimezone,
+      customTasks: suite.tasks.map((task) => task.goal),
+      accessIdentityName,
+      ...(options.extraInputs ?? {})
+    };
 
-  return {
-    startedAt,
-    runDir,
-    report,
-    execution
-  };
+    writeJson(inputsPath, baseInputs);
+
+    const execution = await runTaskSuite({
+      baseUrl: options.baseUrl,
+      suite,
+      runDir,
+      headed: Boolean(options.headed),
+      mobile: Boolean(options.mobile),
+      ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
+      storageStatePath,
+      saveStorageStatePath,
+      maxSessionDurationMs: browserExecutionBudgetMs,
+      provider: llmRuntime.provider,
+      model: llmRuntime.model,
+      ollamaBaseUrl: llmRuntime.ollamaBaseUrl
+    });
+
+    let clickReplayArtifact: string | null = null;
+    let clickReplayFrameCount: number | null = null;
+    let clickReplayDurationMs: number | null = null;
+
+    try {
+      const clickReplay = await generateClickReplay({
+        runDir,
+        taskResults: execution.taskResults
+      });
+      clickReplayArtifact = clickReplay?.artifactName ?? null;
+      clickReplayFrameCount = clickReplay?.frameCount ?? null;
+      clickReplayDurationMs = clickReplay?.durationMs ?? null;
+    } catch {
+      // Replay generation is optional and should never block the main report.
+    }
+
+    writeJson(inputsPath, {
+      ...baseInputs,
+      ...(execution.siteBrief ? { siteBrief: execution.siteBrief } : {}),
+      browserTimezone: execution.browserTimezone,
+      synchronizedTimezone: execution.browserTimezone || execution.deviceTimezone,
+      ...(clickReplayArtifact ? { clickReplayArtifact } : {}),
+      ...(clickReplayFrameCount !== null ? { clickReplayFrameCount } : {}),
+      ...(clickReplayDurationMs !== null ? { clickReplayDurationMs } : {})
+    });
+
+    const remainingEvaluationBudgetMs = Math.max(0, maxRunDurationMs - (Date.now() - startedAtMs));
+    const report = await evaluateRun({
+      baseUrl: options.baseUrl,
+      suite,
+      siteBrief: execution.siteBrief,
+      taskResults: execution.taskResults,
+      rawEvents: execution.rawEvents,
+      accessibility: execution.accessibility,
+      mobile: Boolean(options.mobile),
+      timeoutMs: remainingEvaluationBudgetMs,
+      totalRunDurationMs: maxRunDurationMs,
+      llm: {
+        provider: llmRuntime.provider,
+        model: llmRuntime.model,
+        ollamaBaseUrl: llmRuntime.ollamaBaseUrl
+      }
+    });
+
+    writeJson(path.join(runDir, "report.json"), report);
+    writeText(
+      path.join(runDir, "report.html"),
+      renderHtmlReport({
+        website: options.baseUrl,
+        persona: suite.persona.name,
+        acceptedTasks: suite.tasks.map((task) => task.goal),
+        instructionText,
+        report,
+        taskResults: execution.taskResults,
+        accessibility: execution.accessibility,
+        siteChecks: execution.siteChecks,
+        siteBrief: execution.siteBrief,
+        rawEvents: execution.rawEvents,
+        runId: path.basename(runDir),
+        startedAt,
+        mobile: Boolean(options.mobile),
+        timeZone: execution.browserTimezone || execution.deviceTimezone
+      })
+    );
+    writeText(
+      path.join(runDir, "report.md"),
+      renderMarkdownReport({
+        website: options.baseUrl,
+        persona: suite.persona.name,
+        acceptedTasks: suite.tasks.map((task) => task.goal),
+        instructionText,
+        report,
+        taskResults: execution.taskResults,
+        accessibility: execution.accessibility,
+        siteChecks: execution.siteChecks,
+        siteBrief: execution.siteBrief,
+        rawEvents: execution.rawEvents,
+        startedAt,
+        mobile: Boolean(options.mobile),
+        timeZone: execution.browserTimezone || execution.deviceTimezone
+      })
+    );
+
+    return {
+      startedAt,
+      runDir,
+      report,
+      execution
+    };
+  });
 }

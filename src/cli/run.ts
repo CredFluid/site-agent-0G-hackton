@@ -2,7 +2,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { authSettings, resolveAuthSessionStatePath } from "../auth/profile.js";
 import { runAuthFlow } from "../auth/runner.js";
-import { config } from "../config.js";
+import { config, resolveLlmRuntime, type LlmProvider } from "../config.js";
 import { buildCustomTaskSuite } from "../core/customTaskSuite.js";
 import { runAuditJob } from "../core/runAuditJob.js";
 import { normalizeCustomTasks, SUBMISSION_TASKS_REQUIRED_MESSAGE } from "../submissions/customTasks.js";
@@ -29,6 +29,15 @@ function collectRepeatedOption(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
+function parseLlmProvider(value: string): LlmProvider {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "openai" || normalized === "ollama") {
+    return normalized;
+  }
+
+  throw new Error(`Unsupported LLM provider '${value}'. Use 'openai' or 'ollama'.`);
+}
+
 program
   .name("site-agent-pro")
   .description("Run accepted website tasks like a realistic user and generate an evidence-based task output")
@@ -39,6 +48,9 @@ program
   .option("--storage-state <path>", "Load Playwright storage state JSON before the run")
   .option("--save-storage-state <path>", "Save Playwright storage state JSON after the run")
   .option("--task <task>", "Accepted task for the agent to perform. Repeat for multiple tasks.", collectRepeatedOption, [])
+  .option("--llm-provider <provider>", "LLM provider to use: openai or ollama")
+  .option("--model <model>", "Override the model name for the selected LLM provider")
+  .option("--ollama-base-url <url>", "Override the Ollama base URL")
   .option("--auth-flow", "Create or verify a test account, log in, save session state, then continue the accepted tasks behind auth")
   .option("--auth-only", "Run only the signup/verification/login bootstrap and save session state")
   .option("--signup-url <url>", "Absolute or relative signup URL to use during auth bootstrap")
@@ -52,6 +64,9 @@ program
     storageState?: string;
     saveStorageState?: string;
     task?: string[];
+    llmProvider?: string;
+    model?: string;
+    ollamaBaseUrl?: string;
     authFlow?: boolean;
     authOnly?: boolean;
     signupUrl?: string;
@@ -80,9 +95,19 @@ program
     const signupUrl = resolveMaybeUrl(baseUrl, options.signupUrl ?? authSettings.signupUrl);
     const loginUrl = resolveMaybeUrl(baseUrl, options.loginUrl ?? authSettings.loginUrl);
     const accessUrl = resolveMaybeUrl(baseUrl, options.accessUrl ?? authSettings.accessUrl);
+    const llmRuntime = resolveLlmRuntime({
+      ...(options.llmProvider ? { provider: parseLlmProvider(options.llmProvider) } : {}),
+      ...(options.model?.trim() ? { model: options.model.trim() } : {}),
+      ...(options.ollamaBaseUrl?.trim() ? { ollamaBaseUrl: options.ollamaBaseUrl.trim() } : {})
+    });
 
     info(`Running site agent against ${baseUrl}`);
     info(`Total run budget is capped at ${Math.round(config.maxSessionDurationMs / 1000)} seconds`);
+    info(
+      llmRuntime.provider === "ollama"
+        ? `Using Ollama model ${llmRuntime.model} via ${llmRuntime.ollamaBaseUrl}`
+        : `Using OpenAI model ${llmRuntime.model}`
+    );
     if (!authOnly) {
       info(`Using ${acceptedTasks.length} accepted task${acceptedTasks.length === 1 ? "" : "s"} from explicit input`);
     }
@@ -155,7 +180,10 @@ program
           ...(signupUrl ? { authSignupUrl: signupUrl } : {}),
           ...(loginUrl ? { authLoginUrl: loginUrl } : {}),
           ...(accessUrl ? { authAccessUrl: accessUrl } : {})
-        }
+        },
+        llmProvider: llmRuntime.provider,
+        model: llmRuntime.model,
+        ollamaBaseUrl: llmRuntime.ollamaBaseUrl
       });
 
       info(`Artifacts will be written to ${result.runDir}`);
@@ -176,7 +204,10 @@ program
         customTasks: acceptedTasks,
         instructionText: acceptedTasks.join("\n"),
         instructionFileName: null
-      }
+      },
+      llmProvider: llmRuntime.provider,
+      model: llmRuntime.model,
+      ollamaBaseUrl: llmRuntime.ollamaBaseUrl
     });
 
     info(`Artifacts will be written to ${result.runDir}`);

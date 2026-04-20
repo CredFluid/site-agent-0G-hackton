@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { generateStructured } from "../llm/client.js";
+import { generateStructured, type LlmRuntimeOptions } from "../llm/client.js";
 import { SiteBriefSchema, type PageState, type SiteBrief } from "../schemas/types.js";
 
 const SITE_BRIEF_TIMEOUT_MS = 15000;
@@ -33,7 +33,6 @@ const SiteBriefInputSchema = z.object({
         role: z.string(),
         tag: z.string(),
         text: z.string(),
-        href: z.string().optional(),
         disabled: z.boolean()
       })
     )
@@ -57,7 +56,7 @@ function buildFallbackSiteBrief(pageState: PageState): SiteBrief {
   const primaryHeading = pageState.headings[0] || pageState.title || pageState.url;
   const actionLabels = uniqueItems(
     pageState.interactive
-      .map((item) => item.text || item.href || "")
+      .map((item) => item.text || "")
       .map((item) => normalizeText(item))
       .filter((item) => item.length >= 3 && item.length <= 80),
     5
@@ -91,7 +90,7 @@ function buildFallbackSiteBrief(pageState: PageState): SiteBrief {
   });
 }
 
-export async function deriveSiteBrief(args: { pageState: PageState }): Promise<{
+export async function deriveSiteBrief(args: { pageState: PageState; llm?: LlmRuntimeOptions }): Promise<{
   siteBrief: SiteBrief;
   fallbackReason?: string;
 }> {
@@ -105,7 +104,6 @@ export async function deriveSiteBrief(args: { pageState: PageState }): Promise<{
         role: item.role,
         tag: item.tag,
         text: item.text,
-        ...(item.href ? { href: item.href } : {}),
         disabled: item.disabled
       }))
     }
@@ -113,6 +111,7 @@ export async function deriveSiteBrief(args: { pageState: PageState }): Promise<{
 
   try {
     const siteBrief = await generateStructured<SiteBrief>({
+      ...(args.llm ?? {}),
       systemPrompt: SITE_BRIEF_PROMPT,
       userPayload: payload,
       schemaName: "site_brief",

@@ -1,6 +1,7 @@
 import { devices, type Browser, type BrowserContextOptions, type Page } from "playwright";
 import { config } from "../config.js";
 import { PageProbeSchema, SiteChecksSchema, type CoverageNote, type PageProbe, type SiteChecks, type TaskRunResult } from "../schemas/types.js";
+import { installPlaywrightPageCompat } from "../utils/playwrightCompat.js";
 
 const CTA_KEYWORDS = [
   "get started",
@@ -68,6 +69,37 @@ const NON_DESCRIPTIVE_IMAGE_PATTERN = /^(?:img|image|photo|pic|dsc|screenshot|ba
 const PLACEHOLDER_CONTENT_PATTERN = /\b(?:lorem ipsum|coming soon|under construction|placeholder|sample text|dummy text|tbd|todo)\b/i;
 const SEO_CRAWL_MAX_PAGES = 50;
 const SEO_CRAWL_MAX_DEPTH = 3;
+const SITE_CHECK_METRICS_INIT_SCRIPT = `
+window.__siteAgentMetrics = { fcp: null, lcp: null, cls: 0 };
+
+try {
+  new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      if (entry.name === "first-contentful-paint") {
+        window.__siteAgentMetrics.fcp = entry.startTime;
+      }
+    }
+  }).observe({ type: "paint", buffered: true });
+
+  new PerformanceObserver((list) => {
+    const entries = list.getEntries();
+    const last = entries[entries.length - 1];
+    if (last) {
+      window.__siteAgentMetrics.lcp = last.startTime;
+    }
+  }).observe({ type: "largest-contentful-paint", buffered: true });
+
+  new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      if (!entry.hadRecentInput) {
+        window.__siteAgentMetrics.cls += entry.value ?? 0;
+      }
+    }
+  }).observe({ type: "layout-shift", buffered: true });
+} catch {
+  // Some browsers or pages may block performance observers.
+}
+`;
 
 type ProbeCapture = {
   probe: PageProbe;
@@ -451,51 +483,8 @@ async function collectProbe(args: {
     })
   );
 
-  await context.addInitScript(() => {
-    (window as typeof window & {
-      __siteAgentMetrics?: {
-        fcp: number | null;
-        lcp: number | null;
-        cls: number;
-      };
-    }).__siteAgentMetrics = { fcp: null, lcp: null, cls: 0 };
-
-    try {
-      const metricsWindow = window as typeof window & {
-        __siteAgentMetrics?: {
-          fcp: number | null;
-          lcp: number | null;
-          cls: number;
-        };
-      };
-
-      new PerformanceObserver((list) => {
-        for (const entry of list.getEntries()) {
-          if (entry.name === "first-contentful-paint") {
-            metricsWindow.__siteAgentMetrics!.fcp = entry.startTime;
-          }
-        }
-      }).observe({ type: "paint", buffered: true });
-
-      new PerformanceObserver((list) => {
-        const entries = list.getEntries();
-        const last = entries[entries.length - 1];
-        if (last) {
-          metricsWindow.__siteAgentMetrics!.lcp = last.startTime;
-        }
-      }).observe({ type: "largest-contentful-paint", buffered: true });
-
-      new PerformanceObserver((list) => {
-        for (const entry of list.getEntries() as Array<PerformanceEntry & { hadRecentInput?: boolean; value?: number }>) {
-          if (!entry.hadRecentInput) {
-            metricsWindow.__siteAgentMetrics!.cls += entry.value ?? 0;
-          }
-        }
-      }).observe({ type: "layout-shift", buffered: true });
-    } catch {
-      // Some browsers or pages may block performance observers.
-    }
-  });
+  await installPlaywrightPageCompat(context);
+  await context.addInitScript({ content: SITE_CHECK_METRICS_INIT_SCRIPT });
 
   const page = await context.newPage();
   page.setDefaultNavigationTimeout(args.timeoutMs);

@@ -1,9 +1,17 @@
 import { z } from "zod";
 import { getPreferredAccessIdentity } from "../auth/profile.js";
-import { generateStructured } from "../llm/client.js";
+import { generateStructured, type LlmRuntimeOptions } from "../llm/client.js";
 import { BROWSER_AGENT_PROMPT } from "../prompts/browserAgent.js";
 import {
+  scoreFormFieldTargetMatch,
+  inferFormFieldValue as inferProfileFormFieldValue,
+  isPlaceholderFieldValue as isPlaceholderProfileFieldValue
+} from "./formHeuristics.js";
+import { buildTaskDirectiveSummary, parseTaskDirectives, type TaskDirective } from "./taskDirectives.js";
+import {
   classifyTaskText,
+  extractTaskKeywords,
+  isRegressiveTaskControlLabel,
   normalizeTaskText,
   scoreInteractiveForTask,
   textHasInstructionCue,
@@ -20,7 +28,7 @@ import {
 
 const PLANNER_TIMEOUT_MS = 30000;
 const PLANNER_MAX_RETRIES = 3;
-const ORDERED_STEP_PATTERNS = [/^step\s+\d+\b/i, /^\d+[.)]\s+/, /^(first|second|third|fourth|fifth|next|then|finally)\b/i];
+const ORDERED_STEP_PATTERNS = [/^step\s+\d+\b/i, /^\d+[\.\)]\s+/, /^(first|second|third|fourth|fifth|next|then|finally)\b/i];
 const ACTIONABLE_INSTRUCTION_PATTERNS = [
   /^(?:step\s+\d+[:.)-]?\s*)?(?:click|tap|press|select|choose|open)\b/i,
   /^(?:step\s+\d+[:.)-]?\s*)?(?:enter|type|fill|input|provide)\b/i,
@@ -38,6 +46,13 @@ const ACCESS_GATE_PATTERNS = [
   /\bproceed\b/i,
   /\benter\b/i
 ];
+const ACCOUNT_CREATION_TASK_PATTERN = /\b(?:sign ?up|signup|register|create(?:\s+your)?\s+(?:account|profile)|create\s+my\s+account|join)\b/i;
+const ACCOUNT_CREATION_SUCCESS_PATTERN =
+  /\b(?:registered users?|add another registration|account created|account ready|welcome|dashboard|verify your email|check your email|profile active|view live market screen)\b/i;
+const ACCOUNT_CREATION_STRONG_SUCCESS_PATTERN =
+  /\b(?:registered users?|add another registration|account created|account ready|verify your email|check your email|profile active|view live market screen)\b/i;
+const ACCOUNT_CREATION_LOCAL_ONLY_PATTERN =
+  /\b(?:browser fallback|browser storage only|using browser storage only|local server is unavailable|api is unavailable)\b/i;
 
 const PlannerInputSchema = z.object({
   persona: z.object({
@@ -48,6 +63,18 @@ const PlannerInputSchema = z.object({
   task: z.object({
     name: z.string(),
     goal: z.string(),
+    original_instruction: z.string().default(""),
+    ordered_steps: z
+      .array(
+        z.object({
+          action: z.string(),
+          target: z.string(),
+          raw: z.string()
+        })
+      )
+      .default([]),
+    ordered_step_notes: z.array(z.string()).default([]),
+    ordered_step_confidence: z.enum(["high", "low", "none"]).default("high"),
     success_condition: z.string(),
     failure_signals: z.array(z.string()),
     gameplay: z
@@ -85,19 +112,25 @@ const PlannerInputSchema = z.object({
     visibleLines: z.array(z.string()),
     formFields: z.array(
       z.object({
+        agentId: z.string(),
         label: z.string(),
         placeholder: z.string(),
         name: z.string(),
         id: z.string(),
         tag: z.string(),
         inputType: z.string(),
+        autocomplete: z.string().default(""),
+        inputMode: z.string().default(""),
         value: z.string(),
         required: z.boolean(),
+        checked: z.boolean().optional(),
+        maxLength: z.number().int().positive().nullable().optional(),
         options: z.array(z.string())
       })
     ),
     interactive: z.array(
       z.object({
+        agentId: z.string(),
         role: z.string(),
         tag: z.string(),
         type: z.string().optional(),
@@ -106,11 +139,23 @@ const PlannerInputSchema = z.object({
         disabled: z.boolean()
       })
     ),
+    numberedElements: z.array(z.string()).default([]),
     headings: z.array(z.string()),
     formsPresent: z.boolean(),
     modalHints: z.array(z.string())
   }),
   remainingSeconds: z.number().int().positive().optional(),
+  previous_actions: z.array(
+    z.object({
+      step: z.number(),
+      action: z.string(),
+      target_id: z.string().default(""),
+      target: z.string().default(""),
+      success: z.boolean(),
+      state_changed: z.boolean().default(false),
+      note: z.string()
+    })
+  ).default([]),
   history: z.array(
     z.object({
       step: z.number(),
@@ -120,13 +165,15 @@ const PlannerInputSchema = z.object({
         stepNumber: z.number().nullable().optional(),
         instructionQuote: z.string().optional(),
         action: z.string(),
+        target_id: z.string().default(""),
         target: z.string(),
         expectation: z.string(),
         friction: z.string()
       }),
       result: z.object({
         success: z.boolean(),
-        note: z.string()
+        note: z.string(),
+        stateChanged: z.boolean().optional()
       })
     })
   )
@@ -145,21 +192,310 @@ function normalizeKey(value: string): string {
   return normalizeLineText(value).toLowerCase();
 }
 
-function stripOrderedStepPrefix(value: string): string {
+function normalizeInteractiveIntentLabel(value: string): string {
   return normalizeLineText(value)
-    .replace(/^step\s+\d+\s*[:.)-]?\s*/i, "")
-    .replace(/^\d+\s*[.):-]\s*/, "")
-    .replace(/^(?:first|second|third|fourth|fifth|next|then|finally)\s*[:,.-]?\s*/i, "")
+    .replace(/[^a-z0-9\s]+/gi, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
-function buildInstructionLineCandidates(instructionQuote: string): string[] {
-  const candidates = [
-    normalizeLineText(instructionQuote),
-    stripOrderedStepPrefix(instructionQuote)
-  ].filter(Boolean);
+function countSharedKeywords(left: string, right: string): number {
+  const leftKeywords = extractTaskKeywords(left);
+  const rightKeywords = new Set(extractTaskKeywords(right));
+  return leftKeywords.filter((keyword) => rightKeywords.has(keyword)).length;
+}
 
-  return [...new Set(candidates)];
+function getInteractiveLabel(item: PageState["interactive"][number]): string {
+  return normalizeLineText(item.text || "");
+}
+
+function normalizeTargetId(value: string): string {
+  return normalizeLineText(value);
+}
+
+function findInteractiveByTargetId(pageState: PageState, targetId: string): PageState["interactive"][number] | null {
+  const normalizedTargetId = normalizeTargetId(targetId);
+  if (!normalizedTargetId) {
+    return null;
+  }
+
+  return pageState.interactive.find((item) => item.agentId === normalizedTargetId) ?? null;
+}
+
+function findFormFieldByTargetId(pageState: PageState, targetId: string): PageState["formFields"][number] | null {
+  const normalizedTargetId = normalizeTargetId(targetId);
+  if (!normalizedTargetId) {
+    return null;
+  }
+
+  return pageState.formFields.find((field) => field.agentId === normalizedTargetId) ?? null;
+}
+
+function enrichDecisionTarget(args: {
+  pageState: PageState;
+  decision: PlannerDecision;
+}): PlannerDecision {
+  const targetId = normalizeTargetId(args.decision.target_id || "");
+  const explicitTarget = normalizeLineText(args.decision.target || "");
+
+  if (!targetId) {
+    return {
+      ...args.decision,
+      target_id: "",
+      target: explicitTarget
+    };
+  }
+
+  const interactiveTarget = findInteractiveByTargetId(args.pageState, targetId);
+  if (interactiveTarget) {
+    return {
+      ...args.decision,
+      target_id: targetId,
+      target: explicitTarget || resolveInteractiveTarget(interactiveTarget)
+    };
+  }
+
+  const fieldTarget = findFormFieldByTargetId(args.pageState, targetId);
+  if (fieldTarget) {
+    return {
+      ...args.decision,
+      target_id: targetId,
+      target: explicitTarget || resolveFormFieldTarget(fieldTarget)
+    };
+  }
+
+  return {
+    ...args.decision,
+    target_id: targetId,
+    target: explicitTarget
+  };
+}
+
+function buildInvalidTargetIdStopDecision(args: {
+  pageState: PageState;
+  decision: PlannerDecision;
+}): PlannerDecision {
+  const targetId = normalizeTargetId(args.decision.target_id || "");
+  return buildStopDecision({
+    thought: targetId
+      ? `The planner selected target_id '${targetId}', but that ID is not present in the current numbered page state.`
+      : `The planner returned '${args.decision.action}' without a valid target_id from the current numbered page state.`,
+    expectation:
+      args.decision.action === "click" || args.decision.action === "type"
+        ? "Stop instead of guessing another element or label that was not explicitly numbered on the page."
+        : "Stop because the requested action could not be grounded in the numbered page state."
+  });
+}
+
+function enforceTargetIdDecision(args: {
+  pageState: PageState;
+  decision: PlannerDecision;
+}): PlannerDecision {
+  const decision = enrichDecisionTarget(args);
+
+  if (decision.action === "click") {
+    return decision.target_id && findInteractiveByTargetId(args.pageState, decision.target_id)
+      ? decision
+      : buildInvalidTargetIdStopDecision({ pageState: args.pageState, decision });
+  }
+
+  if (decision.action === "type") {
+    return decision.target_id && findFormFieldByTargetId(args.pageState, decision.target_id)
+      ? decision
+      : buildInvalidTargetIdStopDecision({ pageState: args.pageState, decision });
+  }
+
+  if (decision.target_id || decision.target) {
+    return {
+      ...decision,
+      target_id: "",
+      target: decision.target
+    };
+  }
+
+  return decision;
+}
+
+function enforceLoopAvoidance(args: {
+  history: TaskHistoryEntry[];
+  decision: PlannerDecision;
+}): PlannerDecision {
+  if (!["click", "type"].includes(args.decision.action)) {
+    return args.decision;
+  }
+
+  const targetId = normalizeTargetId(args.decision.target_id || "");
+  if (!targetId) {
+    return args.decision;
+  }
+
+  const repeatedAction = [...args.history]
+    .reverse()
+    .find(
+      (entry) =>
+        entry.decision.action === args.decision.action &&
+        normalizeTargetId(entry.decision.target_id || "") === targetId
+    );
+
+  if (!repeatedAction) {
+    return args.decision;
+  }
+
+  if (repeatedAction.result.stateChanged === false) {
+    return buildStopDecision({
+      thought: `BLOCKED: target_id '${targetId}' was already tried for '${args.decision.action}' and the page state did not change.`,
+      expectation: "Stop instead of retrying the same numbered element or clicking a random alternative to escape the loop."
+    });
+  }
+
+  return args.decision;
+}
+
+function directiveTargetsMatch(left: string, right: string): boolean {
+  const normalizedLeft = normalizeKey(left);
+  const normalizedRight = normalizeKey(right);
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  if (normalizedLeft === normalizedRight) {
+    return true;
+  }
+
+  if (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)) {
+    return true;
+  }
+
+  const leftKeywords = extractTaskKeywords(left);
+  const rightKeywords = extractTaskKeywords(right);
+  if (leftKeywords.length === 0 || rightKeywords.length === 0) {
+    return false;
+  }
+
+  const shared = countSharedKeywords(left, right);
+  return shared >= Math.min(leftKeywords.length, rightKeywords.length) || shared >= 2;
+}
+
+function scoreInteractiveForDirectiveTarget(item: PageState["interactive"][number], target: string): number {
+  const label = getInteractiveLabel(item);
+  if (!label || item.disabled) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const normalizedLabel = normalizeKey(label);
+  const normalizedTarget = normalizeKey(target);
+  let score = 0;
+
+  if (normalizedLabel === normalizedTarget) {
+    score = Math.max(score, 220);
+  }
+  if (normalizedLabel.includes(normalizedTarget) || normalizedTarget.includes(normalizedLabel)) {
+    score = Math.max(score, 180);
+  }
+
+  const targetKeywords = extractTaskKeywords(target);
+  const keywordMatches = countSharedKeywords(target, label);
+  if (targetKeywords.length > 0) {
+    score = Math.max(score, keywordMatches * 40 + (keywordMatches === targetKeywords.length ? 40 : 0));
+  }
+
+  const role = item.role.toLowerCase();
+  const tag = item.tag.toLowerCase();
+  if (role === "button" || role === "tab" || role === "link" || tag === "button" || tag === "a") {
+    score += 10;
+  }
+
+  return score;
+}
+
+function findBestDirectiveInteractiveMatch(pageState: PageState, target: string): PageState["interactive"][number] | null {
+  const ranked = pageState.interactive
+    .map((item) => ({
+      item,
+      score: scoreInteractiveForDirectiveTarget(item, target)
+    }))
+    .filter((candidate) => Number.isFinite(candidate.score) && candidate.score >= 80)
+    .sort((left, right) => right.score - left.score);
+
+  return ranked[0]?.item ?? null;
+}
+
+function isSubmitLikeInteractiveLabel(label: string): boolean {
+  return /^(?:submit|continue|next|finish|complete|done|send|verify|create(?:\s+\w+){0,2}\s+account|sign ?up|register|join(?: now)?|start free|save(?: and continue)?)$/i.test(
+    normalizeInteractiveIntentLabel(label)
+  );
+}
+
+function taskLooksLikeAccountCreation(goal: string): boolean {
+  return ACCOUNT_CREATION_TASK_PATTERN.test(goal);
+}
+
+function pageShowsAccountCreationSuccess(pageState: PageState): boolean {
+  const blob = normalizeTaskText([pageState.title, pageState.visibleText, ...pageState.headings].join(" "));
+  if (ACCOUNT_CREATION_STRONG_SUCCESS_PATTERN.test(blob)) {
+    return true;
+  }
+
+  if (pageState.formsPresent) {
+    return false;
+  }
+
+  return ACCOUNT_CREATION_SUCCESS_PATTERN.test(blob);
+}
+
+function pageShowsAccountCreationLocalOnlyFallback(pageState: PageState): boolean {
+  const blob = normalizeTaskText([pageState.title, pageState.visibleText, ...pageState.headings].join(" "));
+  return ACCOUNT_CREATION_LOCAL_ONLY_PATTERN.test(blob);
+}
+
+function findBestSubmitControl(pageState: PageState): PageState["interactive"][number] | null {
+  const ranked = pageState.interactive
+    .map((item) => {
+      const label = resolveInteractiveTarget(item);
+      let score = Number.NEGATIVE_INFINITY;
+      if (!item.disabled && label) {
+        if (isSubmitLikeInteractiveLabel(label)) {
+          score = 180;
+        } else if (/\bsubmit\b|\bcontinue\b|\bnext\b|\bfinish\b|\bcomplete\b|\bregister\b|\bsign ?up\b|\bcreate\b.*\baccount\b/i.test(label)) {
+          score = 120;
+        }
+
+        const role = item.role.toLowerCase();
+        const tag = item.tag.toLowerCase();
+        if (Number.isFinite(score) && (role === "button" || role === "link" || role === "tab" || tag === "button" || tag === "a")) {
+          score += 10;
+        }
+      }
+
+      return { item, score };
+    })
+    .filter((candidate) => Number.isFinite(candidate.score) && candidate.score >= 100)
+    .sort((left, right) => right.score - left.score);
+
+  return ranked[0]?.item ?? null;
+}
+
+function historyHasSuccessfulClickTarget(history: TaskHistoryEntry[], target: string): boolean {
+  return history.some(
+    (entry) =>
+      entry.decision.action === "click" &&
+      entry.result.success &&
+      directiveTargetsMatch(entry.decision.target || entry.decision.instructionQuote || "", target)
+  );
+}
+
+function taskHasPendingExplicitDirective(taskGoal: string, history: TaskHistoryEntry[]): boolean {
+  return parseTaskDirectives(taskGoal).some((directive) => {
+    if (directive.action === "fill_visible_form") {
+      return false;
+    }
+
+    if (directive.action === "click") {
+      return !historyHasSuccessfulClickTarget(history, directive.target);
+    }
+
+    return true;
+  });
 }
 
 function buildStopDecision(args: {
@@ -174,11 +510,51 @@ function buildStopDecision(args: {
     stepNumber: args.stepNumber ?? null,
     instructionQuote: args.instructionQuote ?? "",
     action: "stop",
+    target_id: "",
     target: "",
     text: "",
     expectation: args.expectation,
     friction: args.friction ?? "high"
   };
+}
+
+function hasSingleProfileConstraint(constraints: string[]): boolean {
+  const constraintBlob = normalizeTaskText(constraints.join(" "));
+  if (!/\b(?:profile|account|identity)\b/i.test(constraintBlob)) {
+    return false;
+  }
+
+  return /\b(?:single|same|one|at most|no more than|only create|create only|reuse|keep using|do not create|don't create|never create)\b/i.test(
+    constraintBlob
+  );
+}
+
+function pageShowsActiveProfile(pageState: PageState): boolean {
+  const pageBlob = normalizeTaskText([pageState.title, pageState.visibleText, ...pageState.headings].join(" "));
+  return /profile active|this visitor profile is saved|update profile|occupations:/i.test(pageBlob);
+}
+
+function isProfileLifecycleControlLabel(label: string): boolean {
+  return /(?:create|register|sign ?up|new|add)\s+(?:profile|account)|(?:profile|account).*(?:create|register|sign ?up)|^(?:update|edit|change|reset|clear)\s+(?:profile|details?|settings?)$/i.test(
+    label
+  );
+}
+
+function violatesRunWideGuardrail(args: {
+  suite: TaskSuite;
+  pageState: PageState;
+  target: string;
+}): boolean {
+  const target = normalizeTaskText(args.target);
+  if (!target) {
+    return false;
+  }
+
+  if (hasSingleProfileConstraint(args.suite.persona.constraints) && pageShowsActiveProfile(args.pageState)) {
+    return isRegressiveTaskControlLabel(target) || isProfileLifecycleControlLabel(target);
+  }
+
+  return false;
 }
 
 function isActionableInstruction(line: string): boolean {
@@ -188,7 +564,7 @@ function isActionableInstruction(line: string): boolean {
 function isInteractiveLine(pageState: PageState, line: string): boolean {
   const normalizedLine = normalizeKey(line);
   return pageState.interactive.some((item) => {
-    const label = normalizeKey(item.text || item.href || "");
+    const label = normalizeKey(getInteractiveLabel(item));
     return Boolean(label) && label === normalizedLine;
   });
 }
@@ -229,8 +605,8 @@ function cleanInstructionTarget(value: string): string {
 }
 
 function extractClickTarget(instructionQuote: string): string | null {
-  const match = stripOrderedStepPrefix(instructionQuote).match(
-    /^(?:click|tap|press|select|choose|open)\s+(?:the\s+)?["'“]?([^"'”]+?)["'”]?(?:\s+(?:button|link|tab|menu|menu item|option|card))?(?:[.!?].*)?$/i
+  const match = instructionQuote.match(
+    /^(?:step\s+\d+[:.)-]?\s*)?(?:click|tap|press|select|choose|open)\s+(?:the\s+)?["'“]?([^"'”]+?)["'”]?(?:\s+(?:button|link|tab|menu|menu item|option|card))?(?:[.!?].*)?$/i
   );
   const target = cleanInstructionTarget(match?.[1] ?? "");
   return target || null;
@@ -238,7 +614,6 @@ function extractClickTarget(instructionQuote: string): string | null {
 
 function extractTypeTarget(instructionQuote: string): string | null {
   const normalized = normalizeLineText(instructionQuote);
-  const stripped = stripOrderedStepPrefix(instructionQuote);
   const explicitMatch = normalized.match(
     /^(?:step\s+\d+[:.)-]?\s*)?(?:enter|type|fill|input|provide)\s+(?:your\s+|the\s+)?(.+?)(?:\s+(?:field|box|input|value|details?))?(?:[.!?].*)?$/i
   );
@@ -247,125 +622,41 @@ function extractTypeTarget(instructionQuote: string): string | null {
   }
 
   return ORDERED_STEP_PATTERNS.some((pattern) => pattern.test(normalized))
-    ? cleanInstructionTarget(stripped) || null
+    ? cleanInstructionTarget(normalized.replace(/^step\s+\d+[:.)-]?\s*/i, "")) || null
     : null;
 }
 
-function findInteractiveTarget(pageState: PageState, instructionQuote: string): string | null {
-  for (const candidate of buildInstructionLineCandidates(instructionQuote)) {
-    const normalizedLine = normalizeKey(candidate);
-    const exact = pageState.interactive.find((item) => normalizeKey(item.text || item.href || "") === normalizedLine);
-    if (exact) {
-      return normalizeLineText(exact.text || exact.href || "");
-    }
-  }
+function findInteractiveControl(pageState: PageState, instructionQuote: string): PageState["interactive"][number] | null {
+  const normalizedLine = normalizeKey(instructionQuote);
+  return pageState.interactive.find((item) => normalizeKey(getInteractiveLabel(item)) === normalizedLine) ?? null;
+}
 
-  return null;
+function findInteractiveTarget(pageState: PageState, instructionQuote: string): string | null {
+  const exact = findInteractiveControl(pageState, instructionQuote);
+  return exact ? getInteractiveLabel(exact) : null;
 }
 
 function findMatchingFormField(pageState: PageState, instructionQuote: string): PageState["formFields"][number] | null {
-  const instructionCandidates = buildInstructionLineCandidates(instructionQuote);
-  const normalizedLineCandidates = instructionCandidates.map((value) => normalizeKey(value));
-  const normalizedTarget = normalizeKey(extractTypeTarget(instructionQuote) ?? instructionCandidates[0] ?? instructionQuote);
-  const rankedCandidates = pageState.formFields
+  const normalizedLine = normalizeKey(instructionQuote);
+  const target = extractTypeTarget(instructionQuote) ?? instructionQuote;
+  const candidates = pageState.formFields
     .map((field) => {
-      const haystack = [field.label, field.placeholder, field.name, field.id].map((value) => normalizeKey(value)).filter(Boolean);
-      let score = 0;
-
-      for (const value of haystack) {
-        if (normalizedLineCandidates.includes(value)) {
-          score = Math.max(score, 120);
-        }
-        if (value === normalizedTarget) {
-          score = Math.max(score, 110);
-        }
-        if (value.includes(normalizedTarget) || normalizedTarget.includes(value)) {
-          score = Math.max(score, 80);
-        }
-      }
-
-      if (field.inputType === normalizedTarget) {
-        score = Math.max(score, 100);
-      }
+      const score = Math.max(
+        scoreFormFieldTargetMatch(field, target),
+        scoreFormFieldTargetMatch(field, instructionQuote),
+        normalizedLine === normalizeKey(resolveFormFieldTarget(field)) ? 120 : 0
+      );
 
       return { field, score };
     })
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score);
 
-  return rankedCandidates[0]?.field ?? null;
+  return candidates[0]?.field ?? null;
 }
 
 function inferFormFieldValue(field: PageState["formFields"][number]): string | null {
-  const profile = getPreferredAccessIdentity();
-  const key = normalizeKey([field.label, field.placeholder, field.name, field.id, field.inputType].join(" "));
-  const defaultAge = "24";
-  const defaultOccupations = "Student, designer, trader";
-
-  if (field.inputType === "email" || /\bemail\b|e-mail/.test(key)) {
-    return profile.email;
-  }
-  if (field.inputType === "password" || /\bpassword\b|passcode|pin\b/.test(key)) {
-    return profile.password;
-  }
-  if (/^names?$/.test(normalizeKey(field.label)) || /\bnames\b/.test(key)) {
-    return profile.fullName;
-  }
-  if (/first.?name|given.?name/.test(key)) {
-    return profile.firstName;
-  }
-  if (/last.?name|surname|family.?name/.test(key)) {
-    return profile.lastName;
-  }
-  if (/full.?name|\bname\b/.test(key) && !/company|organization|business/.test(key)) {
-    return profile.fullName;
-  }
-  if (field.inputType === "number" || /\bage\b|years?\b|how old/.test(key)) {
-    return defaultAge;
-  }
-  if (field.inputType === "tel" || /phone|mobile|telephone|tel\b/.test(key)) {
-    return profile.phone;
-  }
-  if (/address.*line.*2|address 2|suite|unit|apt|apartment/.test(key)) {
-    return profile.addressLine2;
-  }
-  if (/street|address/.test(key)) {
-    return profile.addressLine1;
-  }
-  if (/city|town/.test(key)) {
-    return profile.city;
-  }
-  if (/state|province|region/.test(key)) {
-    return profile.state;
-  }
-  if (/zip|postal/.test(key)) {
-    return profile.postalCode;
-  }
-  if (/country/.test(key)) {
-    return profile.country;
-  }
-  if (/company|organization|business/.test(key)) {
-    return profile.company;
-  }
-  if (/occupation|occupations|job title|profession|role|roles|what do you do/.test(key)) {
-    return defaultOccupations;
-  }
-
-  if (field.required && (field.inputType === "text" || field.tag === "textarea")) {
-    return profile.fullName;
-  }
-
-  if (field.tag === "select" && field.options.length > 0) {
-    const exactCountry = field.options.find((option) => normalizeKey(option) === normalizeKey(profile.country));
-    if (exactCountry) {
-      return exactCountry;
-    }
-
-    const firstRealOption = field.options.find((option) => !/select|choose|pick|--/i.test(option));
-    return firstRealOption ?? null;
-  }
-
-  return null;
+  return inferProfileFormFieldValue(field, getPreferredAccessIdentity());
 }
 
 function resolveFormFieldTarget(field: PageState["formFields"][number]): string {
@@ -373,7 +664,7 @@ function resolveFormFieldTarget(field: PageState["formFields"][number]): string 
 }
 
 function resolveInteractiveTarget(item: PageState["interactive"][number]): string {
-  return normalizeLineText(item.text || item.href || "");
+  return getInteractiveLabel(item);
 }
 
 function findFormFieldStepReference(args: {
@@ -403,20 +694,21 @@ function findFormFieldStepReference(args: {
 }
 
 function isPlaceholderFieldValue(field: PageState["formFields"][number], value: string): boolean {
-  const normalizedValue = normalizeKey(value);
-  if (!normalizedValue) {
-    return true;
-  }
-
-  if (field.tag === "select" && /^(?:select|choose|pick|please select|--+|option)$/i.test(normalizedValue)) {
-    return true;
-  }
-
-  return false;
+  return isPlaceholderProfileFieldValue(field, value);
 }
 
 function findFirstPendingFormField(pageState: PageState): PageState["formFields"][number] | null {
   for (const field of pageState.formFields) {
+    if (
+      field.inputType === "radio" &&
+      field.name &&
+      pageState.formFields.some(
+        (candidate) => candidate !== field && candidate.inputType === "radio" && candidate.name === field.name && candidate.checked
+      )
+    ) {
+      continue;
+    }
+
     const inferredValue = inferFormFieldValue(field);
     if (!inferredValue) {
       continue;
@@ -475,6 +767,7 @@ function buildTaskInteractiveDecision(args: {
     stepNumber: stepReference.stepNumber,
     instructionQuote: stepReference.instructionQuote,
     action: "click",
+    target_id: args.item.agentId,
     target,
     text: "",
     expectation: args.expectation,
@@ -487,6 +780,7 @@ function findBestTaskInteractiveCandidate(args: {
   taskIndex: number;
   pageState: PageState;
   history: TaskHistoryEntry[];
+  disallowTarget?: (target: string) => boolean;
 }): { item: PageState["interactive"][number]; score: number } | null {
   const task = args.suite.tasks[args.taskIndex] ?? args.suite.tasks[0];
   if (!task) {
@@ -502,7 +796,11 @@ function findBestTaskInteractiveCandidate(args: {
         history: args.history
       })
     }))
-    .filter((candidate) => Number.isFinite(candidate.score))
+    .filter(
+      (candidate) =>
+        Number.isFinite(candidate.score) &&
+        !(args.disallowTarget?.(resolveInteractiveTarget(candidate.item)) ?? false)
+    )
     .sort((left, right) => right.score - left.score);
 
   return ranked[0] ?? null;
@@ -515,6 +813,10 @@ function decisionTargetsPendingField(args: {
 }): boolean {
   if (args.decision.action !== "type") {
     return false;
+  }
+
+  if (normalizeTargetId(args.decision.target_id || "") === args.pendingField.agentId) {
+    return true;
   }
 
   const targetText = normalizeLineText(args.decision.target || args.decision.instructionQuote || "");
@@ -551,6 +853,7 @@ function buildFormFirstDecision(args: {
     stepNumber: stepReference.stepNumber,
     instructionQuote: stepReference.instructionQuote,
     action: "type",
+    target_id: args.pendingField.agentId,
     target,
     text,
     expectation: `Fill '${target}' before attempting any later field or submit action on this form.`,
@@ -559,9 +862,15 @@ function buildFormFirstDecision(args: {
 }
 
 function enforceFormFirstDecision(args: {
+  taskGoal: string;
+  history: TaskHistoryEntry[];
   pageState: PageState;
   decision: PlannerDecision;
 }): PlannerDecision {
+  if (taskHasPendingExplicitDirective(args.taskGoal, args.history)) {
+    return args.decision;
+  }
+
   if (!args.pageState.formsPresent || args.pageState.formFields.length === 0) {
     return args.decision;
   }
@@ -588,6 +897,188 @@ function enforceFormFirstDecision(args: {
   });
 }
 
+function enforceOrderedTaskDirectives(args: {
+  task: TaskSuite["tasks"][number];
+  pageState: PageState;
+  history: TaskHistoryEntry[];
+  decision: PlannerDecision;
+}): PlannerDecision {
+  const directives = parseTaskDirectives(args.task.goal);
+  if (directives.length === 0) {
+    return args.decision;
+  }
+
+  for (const directive of directives) {
+    if (directive.action === "click") {
+      if (historyHasSuccessfulClickTarget(args.history, directive.target)) {
+        continue;
+      }
+
+      const matchingControl = findBestDirectiveInteractiveMatch(args.pageState, directive.target);
+      if (!matchingControl) {
+        return buildStopDecision({
+          thought: `The next literal user instruction is to click '${directive.target}', but no visible control clearly matches that target on the current page.`,
+          expectation: `Stop instead of exploring unrelated controls before '${directive.target}' is visible or unambiguous.`
+        });
+      }
+
+      if (args.decision.action === "click" && directiveTargetsMatch(args.decision.target || args.decision.instructionQuote || "", directive.target)) {
+        return args.decision;
+      }
+
+      return buildTaskInteractiveDecision({
+        pageState: args.pageState,
+        item: matchingControl,
+        thought: `The user gave an explicit ordered step to click '${directive.target}', so that named control must be used before any later action in the instruction.`,
+        expectation: `Click '${resolveInteractiveTarget(matchingControl)}' and wait for the page to update before filling fields or using any other tab.`,
+        friction: "medium"
+      });
+    }
+
+    if (directive.action === "type_field") {
+      const field = findMatchingFormField(args.pageState, directive.target);
+      if (!field) {
+        continue;
+      }
+
+      if (!isPlaceholderFieldValue(field, field.value || "")) {
+        continue;
+      }
+
+      const value = inferFormFieldValue(field);
+      if (!value) {
+        return buildStopDecision({
+          thought: `The next literal user instruction is to fill '${directive.target}', but there is no safe inferred value for that visible field.`,
+          expectation: `Stop instead of guessing data for '${directive.target}'.`
+        });
+      }
+
+      if (
+        args.decision.action === "type" &&
+        (normalizeTargetId(args.decision.target_id || "") === field.agentId ||
+          normalizeKey(args.decision.target || args.decision.instructionQuote || "") === normalizeKey(resolveFormFieldTarget(field)))
+      ) {
+        return args.decision;
+      }
+
+      const stepReference = findFormFieldStepReference({
+        pageState: args.pageState,
+        field
+      });
+
+      return {
+        thought: `The user explicitly named '${directive.target}' as the next field to fill, so that field must be completed before any later form action.`,
+        stepNumber: stepReference.stepNumber,
+        instructionQuote: stepReference.instructionQuote,
+        action: "type",
+        target_id: field.agentId,
+        target: resolveFormFieldTarget(field),
+        text: value,
+        expectation: `Fill '${resolveFormFieldTarget(field)}' and wait for the form state to update before moving on.`,
+        friction: "medium"
+      };
+    }
+
+    if (directive.action === "fill_visible_form") {
+      if (!args.pageState.formsPresent) {
+        continue;
+      }
+
+      const pendingField = findFirstPendingFormField(args.pageState);
+      if (!pendingField) {
+        continue;
+      }
+
+      return buildFormFirstDecision({
+        pageState: args.pageState,
+        pendingField,
+        originalDecision: args.decision
+      });
+    }
+
+    if (directive.action === "submit") {
+      if (!args.pageState.formsPresent) {
+        continue;
+      }
+
+      const pendingField = findFirstPendingFormField(args.pageState);
+      if (pendingField) {
+        return buildFormFirstDecision({
+          pageState: args.pageState,
+          pendingField,
+          originalDecision: args.decision
+        });
+      }
+
+      const submitControl = findBestSubmitControl(args.pageState);
+      if (!submitControl) {
+        return buildStopDecision({
+          thought: "The next literal user instruction is to submit the visible form, but there is no clear visible submit-style control on the page.",
+          expectation: "Stop instead of exploring unrelated controls before the submit action is unambiguous."
+        });
+      }
+
+      if (args.decision.action === "click" && isSubmitLikeInteractiveLabel(args.decision.target || args.decision.instructionQuote || "")) {
+        if (!args.decision.target_id || args.decision.target_id === submitControl.agentId) {
+          return args.decision;
+        }
+      }
+
+      return buildTaskInteractiveDecision({
+        pageState: args.pageState,
+        item: submitControl,
+        thought: "The user explicitly instructed the agent to submit after filling the visible form, so the submit-style control must be used next.",
+        expectation: `Click '${resolveInteractiveTarget(submitControl)}' and verify whether the form submits or the next confirmation state appears.`,
+        friction: "medium"
+      });
+    }
+
+    if (directive.action === "scroll" && args.decision.action !== "scroll") {
+      return {
+        thought: "The user explicitly instructed the next step to scroll, so do not substitute another control first.",
+        stepNumber: null,
+        instructionQuote: directive.raw,
+        action: "scroll",
+        target_id: "",
+        target: "",
+        text: "",
+        expectation: "Scroll once, then reassess the next visible step from the same task.",
+        friction: "low"
+      };
+    }
+
+    if (directive.action === "wait" && args.decision.action !== "wait") {
+      return {
+        thought: "The user explicitly instructed the next step to wait, so do not replace that with another action.",
+        stepNumber: null,
+        instructionQuote: directive.raw,
+        action: "wait",
+        target_id: "",
+        target: "",
+        text: "",
+        expectation: "Wait briefly and observe whether the requested next state appears.",
+        friction: "low"
+      };
+    }
+
+    if (directive.action === "back" && args.decision.action !== "back") {
+      return {
+        thought: "The user explicitly instructed the next step to go back, so do not click a different control first.",
+        stepNumber: null,
+        instructionQuote: directive.raw,
+        action: "back",
+        target_id: "",
+        target: "",
+        text: "",
+        expectation: "Go back once and reassess the visible page state.",
+        friction: "medium"
+      };
+    }
+  }
+
+  return args.decision;
+}
+
 function findNextInstruction(args: {
   pageState: PageState;
   history: TaskHistoryEntry[];
@@ -610,197 +1101,6 @@ function pageHasStrictStepContent(pageState: PageState): boolean {
   return extractOrderedInstructionLines(pageState).length > 0;
 }
 
-function buildDecisionFromVisibleInstruction(args: {
-  pageState: PageState;
-  instruction: { stepNumber: number; instructionQuote: string };
-}): PlannerDecision {
-  const matchingField = findMatchingFormField(args.pageState, args.instruction.instructionQuote);
-  if (matchingField) {
-    const formValue = inferFormFieldValue(matchingField);
-    if (formValue) {
-      const target = resolveFormFieldTarget(matchingField);
-      return {
-        thought: "The next unread visible instruction points to a form field that can be advanced safely with the reusable dummy details.",
-        stepNumber: args.instruction.stepNumber,
-        instructionQuote: args.instruction.instructionQuote,
-        action: "type",
-        target,
-        text: formValue,
-        expectation: `Fill '${target}' for this single step, then wait for the form state to update before moving on.`,
-        friction: "medium"
-      };
-    }
-  }
-
-  const directInteractiveTarget = findInteractiveTarget(args.pageState, args.instruction.instructionQuote);
-  if (directInteractiveTarget) {
-    return {
-      thought: "The next unread visible instruction directly matches a visible control, so follow that exact step before considering anything later on the page.",
-      stepNumber: args.instruction.stepNumber,
-      instructionQuote: args.instruction.instructionQuote,
-      action: "click",
-      target: directInteractiveTarget,
-      text: "",
-      expectation: `Click only '${directInteractiveTarget}' and wait for the page to update before considering any later instruction.`,
-      friction: ACCESS_GATE_PATTERNS.some((pattern) => pattern.test(args.instruction.instructionQuote)) ? "low" : "medium"
-    };
-  }
-
-  const clickTarget = extractClickTarget(args.instruction.instructionQuote);
-  if (clickTarget) {
-    return {
-      thought: "The next unread visible instruction explicitly names a control, so follow that single step without skipping ahead.",
-      stepNumber: args.instruction.stepNumber,
-      instructionQuote: args.instruction.instructionQuote,
-      action: "click",
-      target: clickTarget,
-      text: "",
-      expectation: `Click only '${clickTarget}' and wait for the page to update before considering any later instruction.`,
-      friction: "medium"
-    };
-  }
-
-  const typeTarget = extractTypeTarget(args.instruction.instructionQuote);
-  if (typeTarget) {
-    const field = findMatchingFormField(args.pageState, typeTarget);
-    const formValue = field ? inferFormFieldValue(field) : null;
-
-    if (field && formValue) {
-      const target = resolveFormFieldTarget(field);
-      return {
-        thought: "The next unread visible instruction explicitly asks for input and a matching visible field is present.",
-        stepNumber: args.instruction.stepNumber,
-        instructionQuote: args.instruction.instructionQuote,
-        action: "type",
-        target,
-        text: formValue,
-        expectation: `Fill '${target}' for this one step and wait for the form to reflect the new value before moving on.`,
-        friction: "medium"
-      };
-    }
-  }
-
-  if (/^(?:step\s+\d+[:.)-]?\s*)?(?:scroll|swipe)\b/i.test(args.instruction.instructionQuote)) {
-    return {
-      thought: "The next unread visible instruction is an explicit scroll step.",
-      stepNumber: args.instruction.stepNumber,
-      instructionQuote: args.instruction.instructionQuote,
-      action: "scroll",
-      target: "",
-      text: "",
-      expectation: "Scroll once, then wait for the page to settle before evaluating the next visible instruction.",
-      friction: "low"
-    };
-  }
-
-  if (/^(?:step\s+\d+[:.)-]?\s*)?(?:wait|pause|hold)\b/i.test(args.instruction.instructionQuote)) {
-    return {
-      thought: "The next unread visible instruction explicitly says to wait.",
-      stepNumber: args.instruction.stepNumber,
-      instructionQuote: args.instruction.instructionQuote,
-      action: "wait",
-      target: "",
-      text: "",
-      expectation: "Wait briefly, observe the result, and do not execute any later step yet.",
-      friction: "low"
-    };
-  }
-
-  if (/^(?:step\s+\d+[:.)-]?\s*)?(?:go back|back)\b/i.test(args.instruction.instructionQuote)) {
-    return {
-      thought: "The next unread visible instruction explicitly says to go back.",
-      stepNumber: args.instruction.stepNumber,
-      instructionQuote: args.instruction.instructionQuote,
-      action: "back",
-      target: "",
-      text: "",
-      expectation: "Go back once and wait for the page update before reading further instructions.",
-      friction: "medium"
-    };
-  }
-
-  return buildStopDecision({
-    thought: "The next visible instruction cannot be executed safely without guessing, so the run should stop instead of inventing a different action.",
-    expectation: "Stop and report that the current step is ambiguous instead of inferring a missing action.",
-    stepNumber: args.instruction.stepNumber,
-    instructionQuote: args.instruction.instructionQuote
-  });
-}
-
-function decisionMatchesExpectedInstruction(args: {
-  pageState: PageState;
-  decision: PlannerDecision;
-  expected: PlannerDecision;
-}): boolean {
-  if (args.decision.action !== args.expected.action) {
-    return false;
-  }
-
-  if (args.decision.stepNumber !== args.expected.stepNumber) {
-    return false;
-  }
-
-  if (normalizeLineText(args.decision.instructionQuote || "") !== normalizeLineText(args.expected.instructionQuote || "")) {
-    return false;
-  }
-
-  if (args.expected.action === "click") {
-    return normalizeKey(args.decision.target || "") === normalizeKey(args.expected.target || "");
-  }
-
-  if (args.expected.action === "type") {
-    const expectedField = findMatchingFormField(args.pageState, args.expected.target || args.expected.instructionQuote);
-    const actualField = findMatchingFormField(args.pageState, args.decision.target || args.decision.instructionQuote);
-
-    if (expectedField && actualField) {
-      return expectedField === actualField;
-    }
-
-    return normalizeKey(args.decision.target || "") === normalizeKey(args.expected.target || "");
-  }
-
-  return true;
-}
-
-function enforceInstructionOrderDecision(args: {
-  pageState: PageState;
-  history: TaskHistoryEntry[];
-  decision: PlannerDecision;
-}): PlannerDecision {
-  const nextInstruction = findNextInstruction({
-    pageState: args.pageState,
-    history: args.history
-  });
-
-  if (nextInstruction) {
-    const expected = buildDecisionFromVisibleInstruction({
-      pageState: args.pageState,
-      instruction: nextInstruction
-    });
-
-    return decisionMatchesExpectedInstruction({
-      pageState: args.pageState,
-      decision: args.decision,
-      expected
-    })
-      ? args.decision
-      : expected;
-  }
-
-  if (!pageHasStrictStepContent(args.pageState)) {
-    return args.decision;
-  }
-
-  if (args.decision.action === "extract" || args.decision.action === "stop") {
-    return args.decision;
-  }
-
-  return buildStopDecision({
-    thought: "The page still presents ordered step content, but there are no unread actionable instructions left, so the run should stop instead of inventing a new click path.",
-    expectation: "Stop and preserve the evidence already captured rather than branching away from the page instructions."
-  });
-}
-
 function buildFallbackDecision(args: {
   suite: TaskSuite;
   taskIndex: number;
@@ -816,6 +1116,21 @@ function buildFallbackDecision(args: {
   }
 
   const taskProfile = classifyTaskText(task.goal);
+  const latestSuccessfulSubmit = [...args.history]
+    .reverse()
+    .find((entry) => entry.decision.action === "click" && entry.result.success && isSubmitLikeInteractiveLabel(entry.decision.target || ""));
+  if (taskLooksLikeAccountCreation(task.goal) && latestSuccessfulSubmit && pageShowsAccountCreationSuccess(args.pageState)) {
+    const localOnlyFallback = pageShowsAccountCreationLocalOnlyFallback(args.pageState);
+    return buildStopDecision({
+      thought: localOnlyFallback
+        ? "Model planning was unavailable, but a submit-style action already succeeded and the page now shows a browser-only fallback post-registration state, so continuing to click around would only add misleading noise."
+        : "Model planning was unavailable, but the signup flow already appears complete because a submit-style action succeeded and the visible page now shows a post-registration state.",
+      expectation: localOnlyFallback
+        ? "Stop and report that the form submitted, but the page explicitly indicates browser-only fallback storage rather than a shared persisted account state."
+        : "Stop and report the successful post-registration state instead of clicking unrelated navigation controls."
+    });
+  }
+
   const pendingField = findFirstPendingFormField(args.pageState);
   if (pendingField) {
     const target = resolveFormFieldTarget(pendingField);
@@ -831,6 +1146,7 @@ function buildFallbackDecision(args: {
         stepNumber: stepReference.stepNumber,
         instructionQuote: stepReference.instructionQuote,
         action: "type",
+        target_id: pendingField.agentId,
         target,
         text,
         expectation: `Fill '${target}' with a safe dummy value and wait for the field state to update before moving on.`,
@@ -840,43 +1156,184 @@ function buildFallbackDecision(args: {
   }
 
   const pageEvidenceText = normalizeTaskText([args.pageState.title, args.pageState.visibleText, ...args.pageState.headings].join(" "));
-  const bestTaskInteractive = findBestTaskInteractiveCandidate({
-    suite: args.suite,
-    taskIndex: args.taskIndex,
-    pageState: args.pageState,
-    history: args.history
-  });
   const nextInstruction = findNextInstruction({
     pageState: args.pageState,
     history: args.history
   });
 
   if (nextInstruction) {
-    return buildDecisionFromVisibleInstruction({
-      pageState: args.pageState,
-      instruction: nextInstruction
+    const matchingField = findMatchingFormField(args.pageState, nextInstruction.instructionQuote);
+    if (matchingField) {
+      const formValue = inferFormFieldValue(matchingField);
+      if (formValue) {
+        const target = resolveFormFieldTarget(matchingField);
+        return {
+          thought: "Model planning was unavailable, but the next unread visible step matches a form field and can be advanced safely with dummy details.",
+          stepNumber: nextInstruction.stepNumber,
+          instructionQuote: nextInstruction.instructionQuote,
+          action: "type",
+          target_id: matchingField.agentId,
+          target,
+          text: formValue,
+          expectation: `Fill '${target}' for this single step, then wait for the form state to update before moving on.`,
+          friction: "medium"
+        };
+      }
+    }
+
+    const directInteractiveControl = findInteractiveControl(args.pageState, nextInstruction.instructionQuote);
+    if (directInteractiveControl) {
+      const directInteractiveTarget = resolveInteractiveTarget(directInteractiveControl);
+      if (
+        violatesRunWideGuardrail({
+          suite: args.suite,
+          pageState: args.pageState,
+          target: directInteractiveTarget
+        })
+      ) {
+        return buildStopDecision({
+          thought: `Model planning was unavailable, and '${directInteractiveTarget}' would violate a run-wide user constraint from the submission.`,
+          expectation: `Stop instead of using '${directInteractiveTarget}' because it would break the accepted guardrail.`,
+          stepNumber: nextInstruction.stepNumber,
+          instructionQuote: nextInstruction.instructionQuote
+        });
+      }
+
+      return {
+        thought: "Model planning was unavailable, but the next unread visible step directly matches a visible control, so follow it exactly.",
+        stepNumber: nextInstruction.stepNumber,
+        instructionQuote: nextInstruction.instructionQuote,
+        action: "click",
+        target_id: directInteractiveControl.agentId,
+        target: directInteractiveTarget,
+        text: "",
+        expectation: `Click only '${directInteractiveTarget}' and wait for the page to update before considering any later instruction.`,
+        friction: ACCESS_GATE_PATTERNS.some((pattern) => pattern.test(nextInstruction.instructionQuote)) ? "low" : "medium"
+      };
+    }
+
+    const clickTarget = extractClickTarget(nextInstruction.instructionQuote);
+    if (clickTarget) {
+      if (
+        violatesRunWideGuardrail({
+          suite: args.suite,
+          pageState: args.pageState,
+          target: clickTarget
+        })
+      ) {
+        return buildStopDecision({
+          thought: `Model planning was unavailable, and '${clickTarget}' would violate a run-wide user constraint from the submission.`,
+          expectation: `Stop instead of clicking '${clickTarget}' because it would break the accepted guardrail.`,
+          stepNumber: nextInstruction.stepNumber,
+          instructionQuote: nextInstruction.instructionQuote
+        });
+      }
+
+      const matchingControl = findBestDirectiveInteractiveMatch(args.pageState, clickTarget);
+      if (!matchingControl) {
+        return buildStopDecision({
+          thought: `Model planning was unavailable, and the named click target '${clickTarget}' does not map to any numbered visible control on the page.`,
+          expectation: `Stop instead of guessing which numbered element might correspond to '${clickTarget}'.`,
+          stepNumber: nextInstruction.stepNumber,
+          instructionQuote: nextInstruction.instructionQuote
+        });
+      }
+
+      return {
+        thought: "Model planning was unavailable, but the next unread visible instruction explicitly names a control, so follow that single step without skipping ahead.",
+        stepNumber: nextInstruction.stepNumber,
+        instructionQuote: nextInstruction.instructionQuote,
+        action: "click",
+        target_id: matchingControl.agentId,
+        target: resolveInteractiveTarget(matchingControl),
+        text: "",
+        expectation: `Click only '${resolveInteractiveTarget(matchingControl)}' and wait for the page to update before considering any later instruction.`,
+        friction: "medium"
+      };
+    }
+
+    const typeTarget = extractTypeTarget(nextInstruction.instructionQuote);
+    if (typeTarget) {
+      const field = findMatchingFormField(args.pageState, typeTarget);
+      const formValue = field ? inferFormFieldValue(field) : null;
+
+      if (field && formValue) {
+        const target = resolveFormFieldTarget(field);
+        return {
+          thought: "Model planning was unavailable, but the next unread visible instruction explicitly asks for form input and a matching field is present.",
+          stepNumber: nextInstruction.stepNumber,
+          instructionQuote: nextInstruction.instructionQuote,
+          action: "type",
+          target_id: field.agentId,
+          target,
+          text: formValue,
+          expectation: `Fill '${target}' for this one step and wait for the form to reflect the new value before moving on.`,
+          friction: "medium"
+        };
+      }
+    }
+
+    if (/^(?:step\s+\d+[:.)-]?\s*)?(?:scroll|swipe)\b/i.test(nextInstruction.instructionQuote)) {
+      return {
+        thought: "Model planning was unavailable, but the next unread visible instruction is an explicit scroll step.",
+        stepNumber: nextInstruction.stepNumber,
+        instructionQuote: nextInstruction.instructionQuote,
+        action: "scroll",
+        target_id: "",
+        target: "",
+        text: "",
+        expectation: "Scroll once, then wait for the page to settle before evaluating the next visible instruction.",
+        friction: "low"
+      };
+    }
+
+    if (/^(?:step\s+\d+[:.)-]?\s*)?(?:wait|pause|hold)\b/i.test(nextInstruction.instructionQuote)) {
+      return {
+        thought: "Model planning was unavailable, but the next unread visible instruction explicitly says to wait.",
+        stepNumber: nextInstruction.stepNumber,
+        instructionQuote: nextInstruction.instructionQuote,
+        action: "wait",
+        target_id: "",
+        target: "",
+        text: "",
+        expectation: "Wait briefly, observe the result, and do not execute any later step yet.",
+        friction: "low"
+      };
+    }
+
+    if (/^(?:step\s+\d+[:.)-]?\s*)?(?:go back|back)\b/i.test(nextInstruction.instructionQuote)) {
+      return {
+        thought: "Model planning was unavailable, but the next unread visible instruction explicitly says to go back.",
+        stepNumber: nextInstruction.stepNumber,
+        instructionQuote: nextInstruction.instructionQuote,
+        action: "back",
+        target_id: "",
+        target: "",
+        text: "",
+        expectation: "Go back once and wait for the page update before reading further instructions.",
+        friction: "medium"
+      };
+    }
+
+    return buildStopDecision({
+      thought: "Model planning was unavailable and the next visible instruction cannot be executed safely without guessing, so strict mode requires stopping here.",
+      expectation: "Stop and report that the current step is ambiguous instead of inferring a missing action.",
+      stepNumber: nextInstruction.stepNumber,
+      instructionQuote: nextInstruction.instructionQuote
     });
   }
 
   if (pageHasStrictStepContent(args.pageState)) {
     return buildStopDecision({
-      thought: "Model planning was unavailable and there are no clearly unread actionable steps left on the page.",
-      expectation: "Stop rather than inventing a new step or reordering the page instructions."
+      thought: "Model planning was unavailable and there are no clearly unread actionable steps left on the page that can be followed exactly.",
+      expectation: "Stop rather than inventing a new step, substituting another control, or reordering the page instructions."
     });
   }
 
-  if (
-    bestTaskInteractive &&
-    (taskProfile.engagement || taskProfile.gameplay || taskProfile.buttonCoverage) &&
-    bestTaskInteractive.score >= 80
-  ) {
-    const target = resolveInteractiveTarget(bestTaskInteractive.item);
-    return buildTaskInteractiveDecision({
-      pageState: args.pageState,
-      item: bestTaskInteractive.item,
-      thought: `Model planning was unavailable, but '${target}' is the clearest task-aligned live control still visible on the page.`,
-      expectation: `Click '${target}' once and confirm whether the visible state meaningfully changes.`,
-      friction: "medium"
+  if (taskProfile.engagement || taskProfile.gameplay || taskProfile.buttonCoverage || taskProfile.broadNavigation) {
+    return buildStopDecision({
+      thought: "Model planning was unavailable, and strict execution mode forbids guessing a next click from generic live controls.",
+      expectation: "Stop and report that no exact instruction-aligned control could be selected safely."
     });
   }
 
@@ -886,6 +1343,7 @@ function buildFallbackDecision(args: {
       stepNumber: null,
       instructionQuote: "",
       action: "extract",
+      target_id: "",
       target: "",
       text: "",
       expectation: "Record the current visible state exactly as shown and wait for a clearer next instruction.",
@@ -904,6 +1362,34 @@ export type PlannerResolution = {
   fallbackReason?: string;
 };
 
+function finalizePlannerDecision(args: {
+  task: TaskSuite["tasks"][number];
+  pageState: PageState;
+  history: TaskHistoryEntry[];
+  decision: PlannerDecision;
+}): PlannerDecision {
+  return enforceLoopAvoidance({
+    history: args.history,
+    decision: enforceTargetIdDecision({
+      pageState: args.pageState,
+      decision: enforceFormFirstDecision({
+        taskGoal: args.task.goal,
+        history: args.history,
+        pageState: args.pageState,
+        decision: enforceOrderedTaskDirectives({
+          task: args.task,
+          pageState: args.pageState,
+          history: args.history,
+          decision: enrichDecisionTarget({
+            pageState: args.pageState,
+            decision: args.decision
+          })
+        })
+      })
+    })
+  });
+}
+
 export async function decideNextAction(args: {
   suite: TaskSuite;
   taskIndex: number;
@@ -911,17 +1397,41 @@ export async function decideNextAction(args: {
   pageState: PageState;
   history: TaskHistoryEntry[];
   remainingSeconds?: number;
+  llm?: LlmRuntimeOptions;
 }): Promise<PlannerResolution> {
-  const task = args.suite.tasks[args.taskIndex];
+  const task = args.suite.tasks[args.taskIndex] ?? args.suite.tasks[0]!;
+  const orderedSteps = parseTaskDirectives(task.goal);
+  const orderedStepNotes = buildTaskDirectiveSummary(task.goal);
+  const hasUnstructuredSteps = orderedSteps.some((directive) => directive.action === "unstructured");
+  const orderedStepConfidence = orderedSteps.length === 0 ? "none" : hasUnstructuredSteps ? "low" : "high";
   const accessProfile = getPreferredAccessIdentity();
   const payload = PlannerInputSchema.parse({
     persona: args.suite.persona,
-    task,
+    task: {
+      ...task,
+      original_instruction: task.goal,
+      ordered_step_confidence: orderedStepConfidence,
+      ordered_steps: orderedSteps.map((directive) => ({
+        action: directive.action,
+        target: directive.target,
+        raw: directive.raw
+      })),
+      ordered_step_notes: orderedStepNotes
+    },
     siteBrief: args.siteBrief,
     accessProfile,
     pageState: args.pageState,
     ...(args.remainingSeconds !== undefined ? { remainingSeconds: args.remainingSeconds } : {}),
-    history: args.history.slice(-12).map((item) => ({
+    previous_actions: args.history.slice(-20).map((item) => ({
+      step: item.step,
+      action: item.decision.action,
+      target_id: item.decision.target_id,
+      target: item.decision.target,
+      success: item.result.success,
+      state_changed: item.result.stateChanged ?? false,
+      note: item.result.note
+    })),
+    history: args.history.slice(-20).map((item) => ({
       step: item.step,
       url: item.url,
       title: item.title,
@@ -929,19 +1439,22 @@ export async function decideNextAction(args: {
         stepNumber: item.decision.stepNumber,
         instructionQuote: item.decision.instructionQuote,
         action: item.decision.action,
+        target_id: item.decision.target_id,
         target: item.decision.target,
         expectation: item.decision.expectation,
         friction: item.decision.friction
       },
       result: {
         success: item.result.success,
-        note: item.result.note
+        note: item.result.note,
+        ...(item.result.stateChanged !== undefined ? { stateChanged: item.result.stateChanged } : {})
       }
     }))
   });
 
   try {
     const decision = await generateStructured<PlannerDecision>({
+      ...(args.llm ?? {}),
       systemPrompt: BROWSER_AGENT_PROMPT,
       userPayload: payload,
       schemaName: "planner_decision",
@@ -951,19 +1464,19 @@ export async function decideNextAction(args: {
     });
 
     return {
-      decision: enforceFormFirstDecision({
+      decision: finalizePlannerDecision({
+        task,
         pageState: args.pageState,
-        decision: enforceInstructionOrderDecision({
-          pageState: args.pageState,
-          history: args.history,
-          decision: PlannerDecisionSchema.parse(decision)
-        })
+        history: args.history,
+        decision: PlannerDecisionSchema.parse(decision)
       })
     };
   } catch (error) {
     return {
-      decision: enforceFormFirstDecision({
+      decision: finalizePlannerDecision({
+        task,
         pageState: args.pageState,
+        history: args.history,
         decision: buildFallbackDecision({
           suite: args.suite,
           taskIndex: args.taskIndex,

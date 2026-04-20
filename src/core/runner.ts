@@ -19,6 +19,7 @@ import { executeDecision, prepareClickDecision } from "./executor.js";
 import { isGameplayTask, summarizeGameplayHistory } from "./gameplaySummary.js";
 import { deriveSiteBrief } from "./siteBrief.js";
 import { runSiteChecks } from "./siteChecks.js";
+import type { LlmRuntimeOptions } from "../llm/client.js";
 import {
   classifyTaskText,
   hasTaskKeywordEvidence,
@@ -28,6 +29,8 @@ import {
   textHasPlayActionCue
 } from "./taskHeuristics.js";
 import { ensureDir, writeJson } from "../utils/files.js";
+import { debug, warn } from "../utils/log.js";
+import { installPlaywrightPageCompat } from "../utils/playwrightCompat.js";
 import { sleep } from "../utils/time.js";
 import type {
   PageState,
@@ -48,7 +51,7 @@ export type RunOptions = {
   storageStatePath?: string | undefined;
   saveStorageStatePath?: string | undefined;
   maxSessionDurationMs?: number;
-};
+} & LlmRuntimeOptions;
 
 const INTERSTITIAL_PATTERNS = [
   /just a moment/i,
@@ -74,6 +77,12 @@ const AUTO_AUTH_SKIP_TASK_PATTERNS = [
   /reach (?:the )?(?:sign ?up|signup|register|registration|login|sign in|sign-in) page/i
 ];
 const STAGNATION_WINDOW = 5;
+const ACCOUNT_CREATION_TASK_PATTERN = /\b(?:sign ?up|signup|register|create(?:\s+your)?\s+(?:account|profile)|create\s+my\s+account|join)\b/i;
+const ACCOUNT_CREATION_SUBMIT_PATTERN = /\b(?:submit|register|sign ?up|create\b.*\baccount|join)\b/i;
+const ACCOUNT_CREATION_SUCCESS_PATTERN =
+  /\b(?:registered users?|add another registration|account created|account ready|welcome|dashboard|verify your email|check your email|profile active|view live market screen)\b/i;
+const ACCOUNT_CREATION_LOCAL_ONLY_PATTERN =
+  /\b(?:browser fallback|browser storage only|using browser storage only|local server is unavailable|api is unavailable)\b/i;
 
 type ServerlessChromiumModule = {
   args: string[];
@@ -93,7 +102,7 @@ function shouldUseServerlessChromium(): boolean {
     Boolean(process.env.SITE_ID) ||
     Boolean(process.env.URL);
 
-  console.log("chromium mode", {
+  debug("chromium mode", {
     useServerless,
     USE_SERVERLESS_CHROMIUM: process.env.USE_SERVERLESS_CHROMIUM,
     NETLIFY: process.env.NETLIFY,
@@ -108,7 +117,7 @@ function shouldUseServerlessChromium(): boolean {
 async function resolveLaunchOptions(options: { headed: boolean | undefined }): Promise<LaunchOptions> {
   const explicitExecutablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH?.trim();
   if (explicitExecutablePath) {
-    console.log("launch options: using explicit executable path");
+    debug("launch options: using explicit executable path");
     return {
       executablePath: explicitExecutablePath,
       headless: options.headed ? false : config.headless
@@ -116,7 +125,7 @@ async function resolveLaunchOptions(options: { headed: boolean | undefined }): P
   }
 
   if (!shouldUseServerlessChromium()) {
-    console.log("launch options: using default Playwright browser");
+    debug("launch options: using default Playwright browser");
     return {
       headless: options.headed ? false : config.headless
     };
@@ -131,7 +140,7 @@ async function resolveLaunchOptions(options: { headed: boolean | undefined }): P
     serverlessChromium.setGraphicsMode = false;
   }
 
-  console.log("launch options: using serverless chromium", {
+  debug("launch options: using serverless chromium", {
     location: location ?? null
   });
 
@@ -161,6 +170,19 @@ function summarizeLocalPath(filePath: string): string {
 
 function taskAllowsAutoAuth(taskGoal: string): boolean {
   return !AUTO_AUTH_SKIP_TASK_PATTERNS.some((pattern) => pattern.test(taskGoal));
+}
+
+function buildNavigationBlockedSiteBrief(args: { baseUrl: string; note: string }): SiteBrief {
+  return {
+    sitePurpose: "The submitted URL could not be loaded, so the site purpose could not be observed.",
+    intendedUserActions: [],
+    summary: `Navigation to '${args.baseUrl}' failed before any visible landing-page content could be captured.`,
+    evidence: [args.baseUrl, args.note]
+  };
+}
+
+function isBrowserErrorPage(url: string): boolean {
+  return url === "about:blank" || url.startsWith("chrome-error://");
 }
 
 function buildInteractionScreenshotName(args: {
@@ -234,6 +256,10 @@ function matchesAnyPattern(values: string[], patterns: RegExp[]): boolean {
   return values.some((value) => patterns.some((pattern) => pattern.test(value)));
 }
 
+function taskLooksLikeAccountCreation(goal: string): boolean {
+  return ACCOUNT_CREATION_TASK_PATTERN.test(goal);
+}
+
 async function navigateToBaseUrl(args: {
   page: Page;
   baseUrl: string;
@@ -241,10 +267,10 @@ async function navigateToBaseUrl(args: {
   phase: "initial" | "task_reset";
   taskName?: string;
   taskNotes?: string[];
-}): Promise<boolean> {
+}): Promise<{ success: true } | { success: false; note: string }> {
   try {
     await args.page.goto(args.baseUrl, { waitUntil: "domcontentloaded" });
-    return true;
+    return { success: true };
   } catch (error) {
     const note = `Navigation to '${args.baseUrl}' failed: ${cleanErrorMessage(error)}`;
 
@@ -262,7 +288,13 @@ async function navigateToBaseUrl(args: {
       args.taskNotes.push(note);
     }
 
-    return false;
+    warn(
+      args.phase === "initial"
+        ? note
+        : `${note}${args.taskName ? ` while preparing '${args.taskName}'` : ""}`
+    );
+
+    return { success: false, note };
   }
 }
 
@@ -327,6 +359,29 @@ function inferTaskStatus(
     return textHasPlayActionCue(visibleText) ||
       /(?:bet amount|target multiplier|cash out|play again|recent crashes|how to play|round|multiplier)/i.test(visibleText);
   });
+  const successfulSubmitEntry = [...history]
+    .reverse()
+    .find(
+      (entry) =>
+        entry.decision.action === "click" &&
+        entry.result.success &&
+        ACCOUNT_CREATION_SUBMIT_PATTERN.test(entry.decision.target || "")
+    );
+  const accountCreationEvidenceBlob = [
+    successfulSubmitEntry?.result.note ?? "",
+    successfulSubmitEntry?.result.visibleTextSnippet ?? "",
+    successfulSubmitEntry?.result.destinationTitle ?? "",
+    finalTitle,
+    ...taskNotes
+  ].join(" ");
+  const accountCreationLocalOnly =
+    taskLooksLikeAccountCreation(task.goal) &&
+    Boolean(successfulSubmitEntry) &&
+    ACCOUNT_CREATION_LOCAL_ONLY_PATTERN.test(accountCreationEvidenceBlob);
+  const accountCreationSucceeded =
+    taskLooksLikeAccountCreation(task.goal) &&
+    Boolean(successfulSubmitEntry) &&
+    ACCOUNT_CREATION_SUCCESS_PATTERN.test(accountCreationEvidenceBlob);
 
   if (isGameplayTask(task)) {
     const gameplay = summarizeGameplayHistory(history);
@@ -496,6 +551,21 @@ function inferTaskStatus(
   }
 
   if (!hasGoalAlignedEvidence && !taskProfile.broadNavigation) {
+    if (accountCreationSucceeded) {
+      if (accountCreationLocalOnly) {
+        return {
+          status: "partial_success",
+          reason:
+            "The signup form submitted and the site showed a post-registration state, but it explicitly reported browser-only fallback storage, so the account was not confirmed on a shared backend/dashboard."
+        };
+      }
+
+      return {
+        status: "success",
+        reason: "The signup flow submitted successfully and the visible page switched into a post-registration state."
+      };
+    }
+
     if (failedClicks.length > 0) {
       return { status: "failed", reason: failedClicks[0]!.result.note };
     }
@@ -514,6 +584,21 @@ function inferTaskStatus(
     return {
       status: "success",
       reason: "Multiple visible links, tabs, or buttons opened clear destination pages or visible state changes as expected."
+    };
+  }
+
+  if (accountCreationSucceeded) {
+    if (accountCreationLocalOnly) {
+      return {
+        status: "partial_success",
+        reason:
+          "The signup form submitted and the site showed a post-registration state, but it explicitly reported browser-only fallback storage, so the account was not confirmed on a shared backend/dashboard."
+      };
+    }
+
+    return {
+      status: "success",
+      reason: "The signup flow submitted successfully and the visible page switched into a post-registration state."
     };
   }
 
@@ -550,12 +635,29 @@ function buildPageSignature(pageState: PageState): string {
     .slice(0, 8)
     .map((item) => `${item.role}:${item.text}:${item.disabled ? "disabled" : "enabled"}`)
     .join("|");
+  const formSummary = pageState.formFields
+    .slice(0, 12)
+    .map((field) => {
+      const fieldLabel = [field.label, field.placeholder, field.name, field.id, field.inputType].find(Boolean) || "field";
+      const state =
+        field.inputType === "checkbox" || field.inputType === "radio"
+          ? field.checked
+            ? "checked"
+            : "unchecked"
+          : field.value
+            ? "filled"
+            : "empty";
+
+      return `${fieldLabel}:${state}`;
+    })
+    .join("|");
 
   return [
     pageState.url,
     pageState.title,
     pageState.visibleText.slice(0, 900),
-    interactiveSummary
+    interactiveSummary,
+    formSummary
   ].join("::");
 }
 
@@ -575,7 +677,8 @@ function shouldStopForStagnation(args: {
     (entry) =>
       entry.decision.action === "wait" ||
       entry.decision.friction === "high" ||
-      entry.result.success === false
+      entry.result.success === false ||
+      (entry.decision.action === "type" && entry.result.stateChanged === false)
   );
 
   return repeatedPage && stalledAttempts;
@@ -631,6 +734,11 @@ export async function runTaskSuite(options: RunOptions): Promise<{
   browserTimezone: string;
   deviceTimezone: string;
 }> {
+  const llm = {
+    ...(options.provider ? { provider: options.provider } : {}),
+    ...(options.model ? { model: options.model } : {}),
+    ...(options.ollamaBaseUrl ? { ollamaBaseUrl: options.ollamaBaseUrl } : {})
+  };
   const executionBudgetMs = clampRunDurationMs(options.maxSessionDurationMs ?? config.maxSessionDurationMs);
   const executionBudgetSeconds = Math.round(executionBudgetMs / 1000);
   const sessionDeadline = Date.now() + executionBudgetMs;
@@ -759,6 +867,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
 
     browser = await chromium.launch(await resolveLaunchOptions({ headed: options.headed }));
     context = await browser.newContext(contextOptions);
+    await installPlaywrightPageCompat(context);
     page = await context.newPage();
     page.setDefaultNavigationTimeout(config.navigationTimeoutMs);
     page.setDefaultTimeout(config.navigationTimeoutMs);
@@ -801,7 +910,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
       });
     });
 
-    await navigateToBaseUrl({
+    const initialNavigation = await navigateToBaseUrl({
       page,
       baseUrl: options.baseUrl,
       rawEvents,
@@ -809,19 +918,45 @@ export async function runTaskSuite(options: RunOptions): Promise<{
     });
 
     const initialPageState = await capturePageState(page);
-    const siteBriefResolution = await deriveSiteBrief({ pageState: initialPageState });
-    siteBrief = siteBriefResolution.siteBrief;
-    rawEvents.push({
-      type: "site_brief",
-      time: new Date().toISOString(),
-      summary: siteBrief.summary,
-      sitePurpose: siteBrief.sitePurpose,
-      intendedUserActions: siteBrief.intendedUserActions,
-      evidence: siteBrief.evidence,
-      note: siteBriefResolution.fallbackReason
-        ? `The site brief fell back to a deterministic summary after the model-based comprehension step failed: ${siteBriefResolution.fallbackReason}`
-        : "The run generated an upfront site brief before the accepted tasks started."
-    });
+    if (!initialNavigation.success || isBrowserErrorPage(initialPageState.url)) {
+      const blockedNote = !initialNavigation.success
+        ? initialNavigation.note
+        : `The browser remained on '${initialPageState.url}' after attempting the submitted URL.`;
+      siteBrief = buildNavigationBlockedSiteBrief({
+        baseUrl: options.baseUrl,
+        note: blockedNote
+      });
+      rawEvents.push({
+        type: "site_brief",
+        time: new Date().toISOString(),
+        summary: siteBrief.summary,
+        sitePurpose: siteBrief.sitePurpose,
+        intendedUserActions: siteBrief.intendedUserActions,
+        evidence: siteBrief.evidence,
+        note: `Skipped model-based site brief because the submitted URL did not load cleanly: ${blockedNote}`
+      });
+    } else {
+      const siteBriefResolution = await deriveSiteBrief({
+        pageState: initialPageState,
+        llm
+      });
+      siteBrief = siteBriefResolution.siteBrief;
+      rawEvents.push({
+        type: "site_brief",
+        time: new Date().toISOString(),
+        summary: siteBrief.summary,
+        sitePurpose: siteBrief.sitePurpose,
+        intendedUserActions: siteBrief.intendedUserActions,
+        evidence: siteBrief.evidence,
+        note: siteBriefResolution.fallbackReason
+          ? `The site brief fell back to a deterministic summary after the model-based comprehension step failed: ${siteBriefResolution.fallbackReason}`
+          : "The run generated an upfront site brief before the accepted tasks started."
+      });
+
+      if (siteBriefResolution.fallbackReason) {
+        warn(`Site brief fallback for '${options.baseUrl}': ${siteBriefResolution.fallbackReason}`);
+      }
+    }
     const authBootstrapConfigured = isAuthBootstrapConfigured();
     let autoAuthAttempted = false;
 
@@ -839,7 +974,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
       const taskNotes: string[] = [];
       const pageSignatures: string[] = [];
 
-      const resetSucceeded = await navigateToBaseUrl({
+      const resetNavigation = await navigateToBaseUrl({
         page,
         baseUrl: options.baseUrl,
         rawEvents,
@@ -847,7 +982,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
         taskName: task.name,
         taskNotes
       });
-      if (resetSucceeded) {
+      if (resetNavigation.success) {
         await sleep(config.actionDelayMs);
       }
 
@@ -937,7 +1072,10 @@ export async function runTaskSuite(options: RunOptions): Promise<{
             if (authExecution.status !== "failed") {
               if (authExecution.accessConfirmed) {
                 const refreshedPageState = await capturePageState(page);
-                const refreshedSiteBriefResolution = await deriveSiteBrief({ pageState: refreshedPageState });
+                const refreshedSiteBriefResolution = await deriveSiteBrief({
+                  pageState: refreshedPageState,
+                  llm
+                });
                 siteBrief = refreshedSiteBriefResolution.siteBrief;
                 rawEvents.push({
                   type: "site_brief_refresh",
@@ -950,6 +1088,10 @@ export async function runTaskSuite(options: RunOptions): Promise<{
                     ? `The site brief was refreshed after automatic auth using a deterministic fallback: ${refreshedSiteBriefResolution.fallbackReason}`
                     : "The site brief was refreshed after the automatic auth recovery succeeded."
                 });
+
+                if (refreshedSiteBriefResolution.fallbackReason) {
+                  warn(`Site brief refresh fallback for '${options.baseUrl}': ${refreshedSiteBriefResolution.fallbackReason}`);
+                }
               }
 
               await sleep(config.actionDelayMs);
@@ -973,6 +1115,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
                 stepNumber: null,
                 instructionQuote: "",
                 action: "stop" as const,
+                target_id: "",
                 target: "",
                 text: "",
                 expectation: "Stop this task and record that the page appears stalled or blocked.",
@@ -990,7 +1133,8 @@ export async function runTaskSuite(options: RunOptions): Promise<{
               },
               pageState,
               history,
-              remainingSeconds: Math.max(1, Math.floor((sessionDeadline - Date.now()) / 1000))
+              remainingSeconds: Math.max(1, Math.floor((sessionDeadline - Date.now()) / 1000)),
+              llm
             });
         const decision = planning.decision;
 
@@ -1003,6 +1147,10 @@ export async function runTaskSuite(options: RunOptions): Promise<{
             url: pageState.url,
             note: `Planner request did not finish cleanly, so a deterministic fallback action was used (${decision.action}${decision.target ? ` '${decision.target}'` : ""}): ${planning.fallbackReason}`
           });
+          taskNotes.push(
+            `The agent used a heuristic fallback action at step ${step} because the planner did not respond in time: ${planning.fallbackReason}`
+          );
+          warn(`Planner fallback for '${task.name}' step ${step} at '${pageState.url}': ${planning.fallbackReason}`);
         }
 
         const preparedClickResolution =

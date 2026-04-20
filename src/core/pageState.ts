@@ -1,61 +1,36 @@
 import type { Page } from "playwright";
 import { PageStateSchema, type PageState } from "../schemas/types.js";
 
-const VISIBLE_TEXT_LIMIT = 9000;
-const PRIMARY_VISIBLE_LINE_LIMIT = 180;
-const TOTAL_VISIBLE_LINE_LIMIT = 260;
-const INTERACTIVE_LIMIT = 120;
-const FORM_FIELD_LIMIT = 40;
-const HEADING_LIMIT = 24;
-const MODAL_HINT_LIMIT = 6;
-const PRIORITY_LINE_PATTERNS = [
-  /\bhow to play\b/i,
-  /\binstructions?\b/i,
-  /\brules?\b/i,
-  /\btutorial\b/i,
-  /\bhow it works\b/i,
-  /^step\s+\d+\b/i,
-  /^\d+[.)]\s+/,
-  /^(?:first|second|third|fourth|fifth|next|then|finally)\b/i,
-  /\b(?:click|tap|press|select|choose|open|enter|type|fill|input|provide|scroll|wait|pause|back)\b/i
-];
-
-function normalizeLine(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function selectVisibleLines(rawVisibleText: string): string[] {
-  const allLines = rawVisibleText
-    .split(/\r?\n/)
-    .map((line) => normalizeLine(line))
-    .filter(Boolean);
-
-  const chosenIndexes = new Set<number>();
-  for (let index = 0; index < Math.min(PRIMARY_VISIBLE_LINE_LIMIT, allLines.length); index += 1) {
-    chosenIndexes.add(index);
-  }
-
-  allLines.forEach((line, index) => {
-    if (PRIORITY_LINE_PATTERNS.some((pattern) => pattern.test(line))) {
-      chosenIndexes.add(index);
-    }
-  });
-
-  return [...chosenIndexes]
-    .sort((left, right) => left - right)
-    .slice(0, TOTAL_VISIBLE_LINE_LIMIT)
-    .map((index) => allLines[index] ?? "")
-    .filter(Boolean);
-}
-
 export async function capturePageState(page: Page): Promise<PageState> {
   const title = await page.title().catch(() => "");
   const url = page.url();
   const rawVisibleText = await page.locator("body").innerText().catch(() => "");
-  const visibleText = rawVisibleText.replace(/\s+/g, " ").slice(0, VISIBLE_TEXT_LIMIT);
-  const visibleLines = selectVisibleLines(rawVisibleText);
+  const visibleText = rawVisibleText.replace(/\s+/g, " ").slice(0, 4200);
+  const visibleLines = rawVisibleText
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, 140);
 
   const snapshot = await page.evaluate(() => {
+    let nextAgentId = 1;
+
+    const assignAgentId = (element: HTMLElement): string => {
+      const existing = (element.getAttribute("data-site-agent-id") || "").trim();
+      if (existing) {
+        const existingNumber = Number(existing);
+        if (Number.isFinite(existingNumber) && existingNumber >= nextAgentId) {
+          nextAgentId = existingNumber + 1;
+        }
+
+        return existing;
+      }
+
+      const agentId = String(nextAgentId++);
+      element.setAttribute("data-site-agent-id", agentId);
+      return agentId;
+    };
+
     const nodes = Array.from(
       document.querySelectorAll<HTMLElement>(
         "a, button, input, textarea, select, summary, [role='button'], [role='link'], [role='tab'], [role='menuitem'], [role='textbox']"
@@ -76,9 +51,15 @@ export async function capturePageState(page: Page): Promise<PageState> {
           return null;
         }
 
+        const buttonValueText =
+          element instanceof HTMLInputElement && ["submit", "button", "reset"].includes((element.type || "").toLowerCase())
+            ? element.value || ""
+            : "";
+
         const text = (
           element.innerText ||
           element.getAttribute("aria-label") ||
+          buttonValueText ||
           element.getAttribute("placeholder") ||
           element.getAttribute("title") ||
           ""
@@ -94,7 +75,14 @@ export async function capturePageState(page: Page): Promise<PageState> {
         const disabled =
           element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true";
 
+        if (!text) {
+          return null;
+        }
+
+        const agentId = assignAgentId(element);
+
         return {
+          agentId,
           role,
           tag,
           type,
@@ -104,7 +92,7 @@ export async function capturePageState(page: Page): Promise<PageState> {
         };
       })
       .filter(Boolean)
-      .slice(0, INTERACTIVE_LIMIT);
+      .slice(0, 60);
 
     const formFields = Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select"))
       .map((element) => {
@@ -158,37 +146,79 @@ export async function capturePageState(page: Page): Promise<PageState> {
                 .slice(0, 50)
             : [];
 
+        const agentId = assignAgentId(element);
+
         return {
+          agentId,
           label: labelParts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim(),
           placeholder: (element.getAttribute("placeholder") || "").replace(/\s+/g, " ").trim(),
           name: (element.getAttribute("name") || "").replace(/\s+/g, " ").trim(),
           id: (element.id || "").replace(/\s+/g, " ").trim(),
           tag: element.tagName.toLowerCase(),
           inputType: inputType || element.tagName.toLowerCase(),
+          autocomplete: (element.getAttribute("autocomplete") || "").replace(/\s+/g, " ").trim().toLowerCase(),
+          inputMode: (element.getAttribute("inputmode") || "").replace(/\s+/g, " ").trim().toLowerCase(),
           value:
             element instanceof HTMLSelectElement
               ? (element.selectedOptions[0]?.textContent || "").replace(/\s+/g, " ").trim()
               : (element.value || "").replace(/\s+/g, " ").trim(),
           required: element.required || element.getAttribute("aria-required") === "true",
+          checked: element instanceof HTMLInputElement ? element.checked : undefined,
+          maxLength:
+            element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+              ? element.maxLength > 0
+                ? element.maxLength
+                : null
+              : null,
           options
         };
       })
       .filter(Boolean)
-      .slice(0, FORM_FIELD_LIMIT);
+      .slice(0, 30);
+
+    const numberedElements: string[] = [];
+    const seenAgentIds = new Set<string>();
+
+    for (const item of interactive) {
+      if (!item) {
+        continue;
+      }
+
+      if (seenAgentIds.has(item.agentId)) {
+        continue;
+      }
+
+      seenAgentIds.add(item.agentId);
+      numberedElements.push(`[${item.agentId}] ${item.role || item.tag}: "${item.text}"`);
+    }
+
+    for (const field of formFields) {
+      if (!field) {
+        continue;
+      }
+
+      if (seenAgentIds.has(field.agentId)) {
+        continue;
+      }
+
+      seenAgentIds.add(field.agentId);
+      const label = field.label || field.placeholder || field.name || field.id || field.inputType || field.tag;
+      numberedElements.push(`[${field.agentId}] field: "${label}"`);
+    }
 
     const headings = Array.from(document.querySelectorAll("h1, h2, h3"))
       .map((heading) => heading.textContent?.trim() || "")
       .filter(Boolean)
-      .slice(0, HEADING_LIMIT);
+      .slice(0, 16);
 
     const formsPresent = document.querySelectorAll("form").length > 0;
 
     const modalHints = Array.from(document.querySelectorAll("dialog, [role='dialog'], .modal, [aria-modal='true']"))
       .map((element) => element.textContent?.trim()?.slice(0, 140) || "")
       .filter(Boolean)
-      .slice(0, MODAL_HINT_LIMIT);
+      .slice(0, 4);
 
-    return { interactive, formFields, headings, formsPresent, modalHints };
+    return { interactive, formFields, numberedElements, headings, formsPresent, modalHints };
   });
 
   return PageStateSchema.parse({
@@ -198,6 +228,7 @@ export async function capturePageState(page: Page): Promise<PageState> {
     visibleLines,
     formFields: snapshot.formFields,
     interactive: snapshot.interactive,
+    numberedElements: snapshot.numberedElements,
     headings: snapshot.headings,
     formsPresent: snapshot.formsPresent,
     modalHints: snapshot.modalHints

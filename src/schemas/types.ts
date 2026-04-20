@@ -30,6 +30,7 @@ export const PlannerDecisionSchema = z.object({
   stepNumber: z.number().int().positive().nullable().default(null),
   instructionQuote: z.string().default(""),
   action: ActionTypeSchema,
+  target_id: z.string().default(""),
   target: z.string().default(""),
   text: z.string().default(""),
   expectation: z.string().min(1),
@@ -68,6 +69,7 @@ export const SiteBriefSchema = z.object({
 });
 
 export const InteractiveElementSchema = z.object({
+  agentId: z.string(),
   role: z.string(),
   tag: z.string(),
   type: z.string().optional(),
@@ -83,18 +85,24 @@ export const PageStateSchema = z.object({
   visibleLines: z.array(z.string()),
   formFields: z.array(
     z.object({
+      agentId: z.string(),
       label: z.string(),
       placeholder: z.string(),
       name: z.string(),
       id: z.string(),
       tag: z.string(),
       inputType: z.string(),
+      autocomplete: z.string().default(""),
+      inputMode: z.string().default(""),
       value: z.string(),
       required: z.boolean(),
+      checked: z.boolean().optional(),
+      maxLength: z.number().int().positive().nullable().optional(),
       options: z.array(z.string()).default([])
     })
   ),
   interactive: z.array(InteractiveElementSchema),
+  numberedElements: z.array(z.string()).default([]),
   headings: z.array(z.string()),
   formsPresent: z.boolean(),
   modalHints: z.array(z.string())

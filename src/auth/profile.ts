@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import dotenv from "dotenv";
 import path from "node:path";
 import { z } from "zod";
@@ -110,6 +111,60 @@ const AuthEnvSchema = z.object({
 
 const parsed = AuthEnvSchema.parse(process.env);
 
+type AgentIdentityTemplate = {
+  firstName: string;
+  lastName: string;
+  emailLocalPart: string;
+  phone: string;
+  company: string;
+};
+
+export type AccessIdentityContext = {
+  agentIndex?: number;
+  agentLabel?: string | null;
+  agentProfileLabel?: string | null;
+};
+
+const ACCESS_IDENTITY_CONTEXT = new AsyncLocalStorage<AccessIdentityContext>();
+
+const HARD_CODED_AGENT_IDENTITIES: AgentIdentityTemplate[] = [
+  {
+    firstName: "Atlas",
+    lastName: "Sentinel",
+    emailLocalPart: "agentprobe-atlas",
+    phone: "+12025550111",
+    company: "AgentProbe Atlas QA"
+  },
+  {
+    firstName: "Beacon",
+    lastName: "Sentinel",
+    emailLocalPart: "agentprobe-beacon",
+    phone: "+12025550122",
+    company: "AgentProbe Beacon QA"
+  },
+  {
+    firstName: "Cipher",
+    lastName: "Sentinel",
+    emailLocalPart: "agentprobe-cipher",
+    phone: "+12025550133",
+    company: "AgentProbe Cipher QA"
+  },
+  {
+    firstName: "Drift",
+    lastName: "Sentinel",
+    emailLocalPart: "agentprobe-drift",
+    phone: "+12025550144",
+    company: "AgentProbe Drift QA"
+  },
+  {
+    firstName: "Echo",
+    lastName: "Sentinel",
+    emailLocalPart: "agentprobe-echo",
+    phone: "+12025550155",
+    company: "AgentProbe Echo QA"
+  }
+];
+
 export type AuthIdentity = {
   email: string;
   password: string;
@@ -131,7 +186,7 @@ export type AuthIdentityPlan = {
   identities: AuthIdentity[];
 };
 
-let generatedAccessIdentity: AuthIdentity | null = null;
+const generatedAccessIdentities = new Map<number, AuthIdentity>();
 
 export type MailboxConfig = {
   host: string;
@@ -154,6 +209,46 @@ export const authSettings = {
   generatedIdentityMaxAttempts: parsed.AUTH_GENERATED_IDENTITY_MAX_ATTEMPTS
 };
 
+function resolveAgentSlot(args?: AccessIdentityContext): number {
+  const rawIndex = args?.agentIndex;
+  const normalized = typeof rawIndex === "number" && Number.isFinite(rawIndex) ? Math.round(rawIndex) : 1;
+  return Math.min(HARD_CODED_AGENT_IDENTITIES.length, Math.max(1, normalized));
+}
+
+function getActiveAccessIdentityContext(): AccessIdentityContext {
+  return ACCESS_IDENTITY_CONTEXT.getStore() ?? {};
+}
+
+function resolveAgentIdentityTemplate(args?: AccessIdentityContext): AgentIdentityTemplate {
+  return HARD_CODED_AGENT_IDENTITIES[resolveAgentSlot(args) - 1] ?? HARD_CODED_AGENT_IDENTITIES[0]!;
+}
+
+function buildScopedEmail(baseEmail: string | undefined, template: AgentIdentityTemplate): string {
+  if (!baseEmail) {
+    return `${template.emailLocalPart}@example.com`;
+  }
+
+  const parts = splitEmailAddress(baseEmail);
+  if (!parts) {
+    return baseEmail;
+  }
+
+  const baseLocal = parts.localPart.split("+", 1)[0] || parts.localPart;
+  return `${baseLocal}+${template.emailLocalPart}@${parts.domain}`;
+}
+
+export async function runWithAccessIdentityContext<T>(
+  context: AccessIdentityContext,
+  fn: () => Promise<T>
+): Promise<T> {
+  return await ACCESS_IDENTITY_CONTEXT.run(context, fn);
+}
+
+export function getAccessIdentityLabel(context?: AccessIdentityContext): string {
+  const template = resolveAgentIdentityTemplate(context ?? getActiveAccessIdentityContext());
+  return `${template.firstName} ${template.lastName}`;
+}
+
 export function isAuthBootstrapConfigured(): boolean {
   return Boolean(parsed.AUTH_TEST_EMAIL && parsed.AUTH_TEST_PASSWORD);
 }
@@ -167,23 +262,22 @@ export function requireAuthIdentity(): AuthIdentity {
     throw new Error("AUTH_TEST_PASSWORD is required when --auth-flow is enabled.");
   }
 
-  const firstName = parsed.AUTH_TEST_FIRST_NAME ?? "Site";
-  const lastName = parsed.AUTH_TEST_LAST_NAME ?? "Agent";
+  const template = resolveAgentIdentityTemplate(getActiveAccessIdentityContext());
 
   return {
-    email: parsed.AUTH_TEST_EMAIL,
+    email: buildScopedEmail(parsed.AUTH_TEST_EMAIL, template),
     password: parsed.AUTH_TEST_PASSWORD,
-    firstName,
-    lastName,
-    fullName: `${firstName} ${lastName}`.trim(),
-    phone: parsed.AUTH_TEST_PHONE ?? "+12025550123",
+    firstName: template.firstName,
+    lastName: template.lastName,
+    fullName: `${template.firstName} ${template.lastName}`.trim(),
+    phone: parsed.AUTH_TEST_PHONE ?? template.phone,
     addressLine1: parsed.AUTH_TEST_ADDRESS_LINE1 ?? "123 Test Lane",
     addressLine2: parsed.AUTH_TEST_ADDRESS_LINE2 ?? "Suite 100",
     city: parsed.AUTH_TEST_CITY ?? "Austin",
     state: parsed.AUTH_TEST_STATE ?? "Texas",
     postalCode: parsed.AUTH_TEST_POSTAL_CODE ?? "78701",
     country: parsed.AUTH_TEST_COUNTRY ?? "United States",
-    company: parsed.AUTH_TEST_COMPANY ?? "Site Agent QA"
+    company: parsed.AUTH_TEST_COMPANY ?? template.company
   };
 }
 
@@ -201,14 +295,6 @@ function splitEmailAddress(email: string): { localPart: string; domain: string }
 
 function buildRetrySeed(): string {
   return crypto.randomBytes(4).toString("hex");
-}
-
-function appendCompactSuffix(value: string, suffix: string): string {
-  return suffix ? `${value}${suffix}` : value;
-}
-
-function appendSpacedSuffix(value: string, suffix: string): string {
-  return suffix ? `${value} ${suffix}` : value;
 }
 
 function buildVariantPhoneNumber(phone: string, attempt: number): string {
@@ -246,24 +332,20 @@ function buildVariantIdentity(baseIdentity: AuthIdentity, attempt: number, retry
     return baseIdentity;
   }
 
-  const suffix = String(attempt);
-  const firstName = appendCompactSuffix(baseIdentity.firstName, suffix);
-  const lastName = appendCompactSuffix(baseIdentity.lastName, suffix);
-
   return {
     email: buildVariantEmail(baseIdentity.email, attempt, retrySeed),
     password: baseIdentity.password,
-    firstName,
-    lastName,
-    fullName: `${firstName} ${lastName}`.trim(),
+    firstName: baseIdentity.firstName,
+    lastName: baseIdentity.lastName,
+    fullName: baseIdentity.fullName,
     phone: buildVariantPhoneNumber(baseIdentity.phone, attempt),
     addressLine1: baseIdentity.addressLine1,
-    addressLine2: appendSpacedSuffix(baseIdentity.addressLine2, suffix),
+    addressLine2: baseIdentity.addressLine2,
     city: baseIdentity.city,
     state: baseIdentity.state,
     postalCode: baseIdentity.postalCode,
     country: baseIdentity.country,
-    company: appendSpacedSuffix(baseIdentity.company, suffix)
+    company: baseIdentity.company
   };
 }
 
@@ -283,29 +365,31 @@ export function getPreferredAccessIdentity(): AuthIdentity {
     return requireAuthIdentity();
   }
 
-  if (!generatedAccessIdentity) {
-    const retrySeed = buildRetrySeed();
-    const firstName = "Site";
-    const lastName = "Agent";
+  const context = getActiveAccessIdentityContext();
+  const agentSlot = resolveAgentSlot(context);
 
-    generatedAccessIdentity = {
-      email: `siteagent+${retrySeed}@example.com`,
+  if (!generatedAccessIdentities.has(agentSlot)) {
+    const retrySeed = buildRetrySeed();
+    const template = resolveAgentIdentityTemplate(context);
+
+    generatedAccessIdentities.set(agentSlot, {
+      email: `${template.emailLocalPart}+${retrySeed}@example.com`,
       password: `SiteAgent!${retrySeed.slice(0, 4)}9`,
-      firstName,
-      lastName,
-      fullName: `${firstName} ${lastName}`,
-      phone: "+12025550123",
+      firstName: template.firstName,
+      lastName: template.lastName,
+      fullName: `${template.firstName} ${template.lastName}`,
+      phone: template.phone,
       addressLine1: "123 Test Lane",
       addressLine2: "Suite 100",
       city: "Austin",
       state: "Texas",
       postalCode: "78701",
       country: "United States",
-      company: "Site Agent QA"
-    };
+      company: template.company
+    });
   }
 
-  return generatedAccessIdentity;
+  return generatedAccessIdentities.get(agentSlot)!;
 }
 
 export function getMailboxConfig(): MailboxConfig | null {

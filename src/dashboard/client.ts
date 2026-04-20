@@ -1155,7 +1155,11 @@ function renderRunMetaPanel(detail: DashboardRunDetail): string {
     describeBatchRole(inputs?.batchRole ?? "single", inputs?.agentCount ?? 1),
     inputs?.mobile ? "Mobile-sized run" : "Desktop-sized run",
     inputs?.headed ? "Headed browser" : "Headless browser",
-    inputs?.model ? `Model ${inputs.model}` : null,
+    inputs?.llmProvider && inputs?.model
+      ? `${inputs.llmProvider === "ollama" ? "Ollama" : "OpenAI"} ${inputs.model}`
+      : inputs?.model
+        ? `Model ${inputs.model}`
+        : null,
     inputs?.synchronizedTimezone ? `Timezone ${inputs.synchronizedTimezone}` : null,
     `${detail.rawEventCount} raw events`
   ].filter((item): item is string => Boolean(item));

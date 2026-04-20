@@ -4,15 +4,15 @@ import { AccessibilityResultSchema, type AccessibilityResult } from "../schemas/
 
 export async function runAccessibilityAudit(page: Page): Promise<AccessibilityResult> {
   try {
-    await page.evaluate(axeCore.source);
-    const results = await page.evaluate(async () => {
-      const axe = (window as Window & typeof globalThis & { axe?: { run: (context?: Element | Document, options?: unknown) => Promise<unknown> } }).axe;
+    await page.addScriptTag({ content: axeCore.source });
+    const results = await page.evaluate(`(async () => {
+      const axe = globalThis.axe;
       if (!axe) {
         throw new Error("axe-core did not load into the page context.");
       }
 
       return axe.run(document);
-    });
+    })()`);
 
     return AccessibilityResultSchema.parse({
       violations: (results as { violations: Array<{ id: string; impact?: string | null; description: string; help: string; nodes: Array<unknown> }> }).violations.map(

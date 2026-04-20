@@ -77,6 +77,7 @@ export async function buildRunSummary(repository: RunRepository, runId: string):
     startedAt: inputs?.startedAt ?? null,
     headed: inputs?.headed ?? false,
     mobile: inputs?.mobile ?? false,
+    llmProvider: inputs?.llmProvider ?? null,
     model: inputs?.model ?? null,
     persona: inputs?.persona ?? null,
     overallScore: report?.overall_score ?? null,

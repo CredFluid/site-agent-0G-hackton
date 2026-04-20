@@ -1,5 +1,16 @@
 import type { Locator, Page } from "playwright";
 import type { ClickIndicator, PlannerDecision } from "../schemas/types.js";
+import {
+  findMatchingSelectOption,
+  fitValueToField,
+  scoreFormFieldTargetMatch,
+  shouldCheckField
+} from "./formHeuristics.js";
+import {
+  buildLooseAccessiblePattern,
+  prepareLocatorForInteraction,
+  typeLikeHuman
+} from "./interaction.js";
 
 type VisibleState = {
   url: string;
@@ -8,6 +19,7 @@ type VisibleState = {
 };
 
 type FillableField = {
+  agentId: string;
   marker: string;
   label: string;
   placeholder: string;
@@ -15,7 +27,21 @@ type FillableField = {
   id: string;
   tag: string;
   inputType: string;
+  autocomplete: string;
+  inputMode: string;
+  checked: boolean | undefined;
+  maxLength: number | null;
   options: string[];
+};
+
+type FieldRuntimeState = {
+  value: string;
+  checked: boolean | null;
+};
+
+type FillOperation = {
+  expectedValue: string;
+  mode: "fill" | "select" | "check";
 };
 
 export type PreparedClickAction = {
@@ -49,6 +75,14 @@ function normalizeKey(value: string): string {
   return normalizeText(value).toLowerCase();
 }
 
+function escapeAttributeValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function resolveDecisionTargetLabel(decision: PlannerDecision): string {
+  return decision.target.trim() || decision.target_id.trim();
+}
+
 function truncateLabel(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
     return value;
@@ -67,6 +101,23 @@ async function readVisibleState(page: Page): Promise<VisibleState> {
   const url = page.url();
   const textSnippet = normalizeText(await page.locator("body").innerText().catch(() => "")).slice(0, 800);
   return { url, title, textSnippet };
+}
+
+async function captureClickNeighborhood(locator: Locator): Promise<string> {
+  try {
+    return await locator.evaluate((element) => {
+      const container =
+        element.closest("section, article, nav, main, aside, dialog, [role='dialog'], [role='tabpanel'], .modal, .card, .panel, .accordion") ||
+        element.parentElement;
+      if (!container) {
+        return "";
+      }
+
+      return (container.innerHTML || "").replace(/\s+/g, " ").trim().slice(0, 600);
+    });
+  } catch {
+    return "";
+  }
 }
 
 function describeStateChange(before: VisibleState, after: VisibleState): {
@@ -99,14 +150,45 @@ async function firstVisible(locators: Array<{ locator: Locator; name: string }>)
 }
 
 async function findClickTarget(page: Page, target: string): Promise<{ locator: Locator; name: string } | null> {
+  const escapedTarget = escapeAttributeValue(target);
+  const targetPattern = buildLooseAccessiblePattern(target);
+
+  if (!targetPattern) {
+    return null;
+  }
+
   return firstVisible([
-    { locator: page.getByRole("button", { name: target, exact: false }), name: "getByRole(button)" },
-    { locator: page.getByRole("link", { name: target, exact: false }), name: "getByRole(link)" },
-    { locator: page.getByRole("tab", { name: target, exact: false }), name: "getByRole(tab)" },
-    { locator: page.getByRole("menuitem", { name: target, exact: false }), name: "getByRole(menuitem)" },
-    { locator: page.getByText(target, { exact: false }), name: "getByText" },
-    { locator: page.locator(`[aria-label*="${target}"]`), name: "aria-label contains" }
+    { locator: page.getByRole("button", { name: targetPattern }), name: "getByRole(button)" },
+    { locator: page.getByRole("link", { name: targetPattern }), name: "getByRole(link)" },
+    { locator: page.getByRole("tab", { name: targetPattern }), name: "getByRole(tab)" },
+    { locator: page.getByRole("menuitem", { name: targetPattern }), name: "getByRole(menuitem)" },
+    {
+      locator: page.locator(
+        `input[type="submit"][value*="${escapedTarget}" i], input[type="button"][value*="${escapedTarget}" i], input[type="reset"][value*="${escapedTarget}" i]`
+      ),
+      name: "input[value contains]"
+    },
+    { locator: page.getByText(targetPattern), name: "getByText" },
+    { locator: page.locator(`[aria-label*="${escapedTarget}" i]`), name: "aria-label contains" }
   ]);
+}
+
+async function findClickTargetById(page: Page, targetId: string): Promise<{ locator: Locator; name: string } | null> {
+  const normalizedTargetId = targetId.trim();
+  if (!normalizedTargetId) {
+    return null;
+  }
+
+  const locator = page.locator(`[data-site-agent-id="${escapeAttributeValue(normalizedTargetId)}"]`).first();
+  try {
+    if (await locator.isVisible({ timeout: 1200 })) {
+      return { locator, name: "target_id" };
+    }
+  } catch {
+    // continue
+  }
+
+  return null;
 }
 
 async function buildClickIndicator(locator: Locator, target: string): Promise<ClickIndicator | undefined> {
@@ -130,17 +212,35 @@ export async function prepareClickDecision(page: Page, decision: PlannerDecision
   note?: string;
   preparedClick?: PreparedClickAction;
 }> {
-  const target = decision.target.trim();
-  if (!target) {
+  const targetLabel = resolveDecisionTargetLabel(decision);
+  const targetId = decision.target_id.trim();
+
+  if (targetId) {
+    const match = await findClickTargetById(page, targetId);
+    if (!match) {
+      return { note: `Could not find numbered clickable element for target_id '${targetId}'` };
+    }
+
+    const clickIndicator = await buildClickIndicator(match.locator, targetLabel || targetId);
+    return {
+      preparedClick: {
+        locator: match.locator,
+        matchedBy: match.name,
+        ...(clickIndicator ? { clickIndicator } : {})
+      }
+    };
+  }
+
+  if (!targetLabel) {
     return { note: "Decision required a target but did not provide one" };
   }
 
-  const match = await findClickTarget(page, target);
+  const match = await findClickTarget(page, targetLabel);
   if (!match) {
-    return { note: `Could not find clickable element for '${target}'` };
+    return { note: `Could not find clickable element for '${targetLabel}'` };
   }
 
-  const clickIndicator = await buildClickIndicator(match.locator, target);
+  const clickIndicator = await buildClickIndicator(match.locator, targetLabel);
   return {
     preparedClick: {
       locator: match.locator,
@@ -174,6 +274,8 @@ async function collectVisibleFillableFields(page: Page): Promise<FillableField[]
 
         const marker = String(index + 1);
         element.setAttribute("data-site-agent-fill-field", marker);
+        const agentId = (element.getAttribute("data-site-agent-id") || "").trim() || marker;
+        element.setAttribute("data-site-agent-id", agentId);
 
         const labelParts: string[] = [];
         if ("labels" in element && element.labels) {
@@ -208,6 +310,7 @@ async function collectVisibleFillableFields(page: Page): Promise<FillableField[]
             : [];
 
         return {
+          agentId,
           marker,
           label: labelParts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim(),
           placeholder: (element.getAttribute("placeholder") || "").replace(/\s+/g, " ").trim(),
@@ -215,6 +318,15 @@ async function collectVisibleFillableFields(page: Page): Promise<FillableField[]
           id: (element.id || "").replace(/\s+/g, " ").trim(),
           tag: element.tagName.toLowerCase(),
           inputType: inputType || element.tagName.toLowerCase(),
+          autocomplete: (element.getAttribute("autocomplete") || "").replace(/\s+/g, " ").trim().toLowerCase(),
+          inputMode: (element.getAttribute("inputmode") || "").replace(/\s+/g, " ").trim().toLowerCase(),
+          checked: element instanceof HTMLInputElement ? element.checked : undefined,
+          maxLength:
+            element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+              ? element.maxLength > 0
+                ? element.maxLength
+                : null
+              : null,
           options
         };
       })
@@ -225,31 +337,7 @@ async function collectVisibleFillableFields(page: Page): Promise<FillableField[]
 }
 
 function scoreFieldMatch(field: FillableField, target: string): number {
-  const normalizedTarget = normalizeKey(target);
-  const candidates = [field.label, field.placeholder, field.name, field.id].map((value) => normalizeKey(value)).filter(Boolean);
-  let score = 0;
-
-  for (const candidate of candidates) {
-    if (candidate === normalizedTarget) {
-      score = Math.max(score, 120);
-    }
-    if (candidate.includes(normalizedTarget) || normalizedTarget.includes(candidate)) {
-      score = Math.max(score, 90);
-    }
-  }
-
-  if (field.inputType === normalizedTarget) {
-    score = Math.max(score, 110);
-  }
-
-  if (normalizedTarget.includes("password") && field.inputType === "password") {
-    score = Math.max(score, 130);
-  }
-  if (normalizedTarget.includes("email") && field.inputType === "email") {
-    score = Math.max(score, 130);
-  }
-
-  return score;
+  return scoreFormFieldTargetMatch(field, target);
 }
 
 function findBestFillableField(fields: FillableField[], target: string): FillableField | null {
@@ -264,41 +352,141 @@ function findBestFillableField(fields: FillableField[], target: string): Fillabl
   return ranked[0]?.field ?? null;
 }
 
+function getFillableFieldLocator(page: Page, field: FillableField): Locator {
+  return page.locator(`[data-site-agent-id="${escapeAttributeValue(field.agentId)}"]`).first();
+}
+
+async function readFieldRuntimeState(locator: Locator, field: FillableField): Promise<FieldRuntimeState> {
+  if (field.inputType === "checkbox" || field.inputType === "radio") {
+    const checked = await locator.isChecked().catch(async () => {
+      return locator
+        .evaluate((element) => (element instanceof HTMLInputElement ? element.checked : false))
+        .catch(() => false);
+    });
+
+    return {
+      value: checked ? "checked" : "",
+      checked
+    };
+  }
+
+  if (field.tag === "select") {
+    const value = await locator
+      .evaluate((element) => {
+        if (!(element instanceof HTMLSelectElement)) {
+          return "";
+        }
+
+        return ((element.selectedOptions[0]?.textContent || element.value || "") as string).replace(/\s+/g, " ").trim();
+      })
+      .catch(() => "");
+
+    return {
+      value: normalizeText(value),
+      checked: null
+    };
+  }
+
+  const value = await locator
+    .inputValue()
+    .catch(async () => {
+      return locator
+        .evaluate((element) => {
+          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+            return element.value;
+          }
+
+          return "";
+        })
+        .catch(() => "");
+    });
+
+  return {
+    value: normalizeText(value),
+    checked: null
+  };
+}
+
+function didFieldStateChange(before: FieldRuntimeState, after: FieldRuntimeState): boolean {
+  return normalizeKey(before.value) !== normalizeKey(after.value) || before.checked !== after.checked;
+}
+
+function doesFieldStateMatchExpected(args: {
+  after: FieldRuntimeState;
+  operation: FillOperation;
+}): boolean {
+  if (args.operation.mode === "check") {
+    return args.after.checked === true;
+  }
+
+  return normalizeKey(args.after.value) === normalizeKey(args.operation.expectedValue);
+}
+
 async function fillFieldValue(args: {
-  page: Page;
+  locator: Locator;
   field: FillableField;
   value: string;
-}): Promise<void> {
-  const locator = args.page.locator(`[data-site-agent-fill-field="${args.field.marker}"]`);
+}): Promise<FillOperation> {
+  if (shouldCheckField(args.value) && (args.field.inputType === "checkbox" || args.field.inputType === "radio")) {
+    const preparedLocator = await prepareLocatorForInteraction(args.locator);
+
+    if (args.field.checked) {
+      return {
+        expectedValue: "checked",
+        mode: "check"
+      };
+    }
+
+    await preparedLocator.check({ force: true }).catch(async () => {
+      await preparedLocator.click({ force: true });
+    });
+    return {
+      expectedValue: "checked",
+      mode: "check"
+    };
+  }
+
   if (args.field.tag === "select") {
+    const preparedLocator = await prepareLocatorForInteraction(args.locator);
     const desired = normalizeText(args.value);
+    const matchedOption = findMatchingSelectOption(args.field.options, [desired]);
     try {
-      await locator.selectOption({ label: desired });
-      return;
+      await preparedLocator.selectOption({ label: desired });
+      return {
+        expectedValue: desired,
+        mode: "select"
+      };
     } catch {
-      const matchingOption = args.field.options.find((option) => normalizeKey(option) === normalizeKey(desired));
-      if (matchingOption) {
-        await locator.selectOption({ label: matchingOption });
-        return;
+      if (matchedOption) {
+        await preparedLocator.selectOption({ label: matchedOption });
+        return {
+          expectedValue: matchedOption,
+          mode: "select"
+        };
       }
     }
   }
 
-  await locator.fill(args.value);
+  const fittedValue = fitValueToField(args.field, args.value);
+  await typeLikeHuman(args.locator, fittedValue);
+  return {
+    expectedValue: fittedValue,
+    mode: "fill"
+  };
 }
 
 async function triggerLocatorClick(locator: Locator): Promise<string> {
-  await locator.scrollIntoViewIfNeeded().catch(() => undefined);
+  const preparedLocator = await prepareLocatorForInteraction(locator);
 
   try {
-    await locator.click({ timeout: 4000 });
+    await preparedLocator.click({ timeout: 4000 });
     return "playwright-click";
   } catch {
     try {
-      await locator.click({ force: true, timeout: 4000 });
+      await preparedLocator.click({ force: true, timeout: 4000 });
       return "playwright-force-click";
     } catch {
-      await locator.evaluate((element) => {
+      await preparedLocator.evaluate((element) => {
         if (!(element instanceof HTMLElement)) {
           return;
         }
@@ -406,8 +594,9 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
       return { success: true, stop: true, note: "Planner decided to stop due to friction or completion" };
     }
 
-    const target = decision.target.trim();
-    if (!target) {
+    const target = resolveDecisionTargetLabel(decision);
+    const targetId = decision.target_id.trim();
+    if (!target && !targetId) {
       return { success: false, note: "Decision required a target but did not provide one" };
     }
 
@@ -416,11 +605,12 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
       if (!preparedClickResolution.preparedClick) {
         return {
           success: false,
-          note: preparedClickResolution.note ?? `Could not find clickable element for '${target}'`
+          note: preparedClickResolution.note ?? `Could not find clickable element for '${target || targetId}'`
         };
       }
 
       const before = await readVisibleState(page);
+      const neighborhoodBefore = await captureClickNeighborhood(preparedClickResolution.preparedClick.locator);
       const startedAt = Date.now();
       const clickStrategy = await triggerLocatorClick(preparedClickResolution.preparedClick.locator);
       let after = await waitForPostActionState(page);
@@ -434,12 +624,20 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
         ({ stateChanged, destinationLabel } = describeStateChange(before, after));
       }
 
+      if (!stateChanged) {
+        const neighborhoodAfter = await captureClickNeighborhood(preparedClickResolution.preparedClick.locator);
+        if (neighborhoodBefore && neighborhoodAfter && neighborhoodBefore !== neighborhoodAfter) {
+          stateChanged = true;
+          destinationLabel = normalizeText(after.title) || after.url;
+        }
+      }
+
       const blockedByInterstitial = isInterstitialState(after);
 
       if (blockedByInterstitial) {
         return {
           success: false,
-          note: `Clicked '${target}' and hit a security or verification interstitial after ${elapsedMs}ms`,
+          note: `Clicked '${target || targetId}' and hit a security or verification interstitial after ${elapsedMs}ms`,
           matchedBy: `${preparedClickResolution.preparedClick.matchedBy}:${clickStrategy}`,
           elapsedMs,
           destinationUrl: after.url,
@@ -455,8 +653,8 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
       return {
         success: stateChanged,
         note: stateChanged
-          ? `Clicked '${target}' and reached '${destinationLabel}' after ${elapsedMs}ms`
-          : `Clicked '${target}' but the page showed no clear visible change after ${elapsedMs}ms`,
+          ? `Clicked '${target || targetId}' and reached '${destinationLabel}' after ${elapsedMs}ms`
+          : `Clicked '${target || targetId}' but the page showed no clear visible change after ${elapsedMs}ms`,
         matchedBy: `${preparedClickResolution.preparedClick.matchedBy}:${clickStrategy}`,
         elapsedMs,
         destinationUrl: after.url,
@@ -471,24 +669,51 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
 
     if (decision.action === "type") {
       const fields = await collectVisibleFillableFields(page);
-      const matchedField = findBestFillableField(fields, target);
+      const matchedField = targetId
+        ? fields.find((field) => field.agentId === targetId) ?? null
+        : findBestFillableField(fields, target);
 
       if (!matchedField) {
-        return { success: false, note: `Could not find input for '${target}'` };
+        return { success: false, note: `Could not find input for '${target || targetId}'` };
       }
 
-      await fillFieldValue({
-        page,
+      const locator = getFillableFieldLocator(page, matchedField);
+      const beforeFieldState = await readFieldRuntimeState(locator, matchedField).catch(() => ({
+        value: "",
+        checked: matchedField.checked ?? null
+      }));
+      const operation = await fillFieldValue({
+        locator,
         field: matchedField,
         value: decision.text || ""
       });
+      const afterFieldState = await readFieldRuntimeState(locator, matchedField).catch(() => beforeFieldState);
+      const stateChanged = didFieldStateChange(beforeFieldState, afterFieldState);
+      const valueApplied = doesFieldStateMatchExpected({
+        after: afterFieldState,
+        operation
+      });
       const after = await readVisibleState(page);
+
+      if (!valueApplied) {
+        return {
+          success: false,
+          note: `Tried to fill '${target || targetId}', but the field did not keep the requested value`,
+          matchedBy: `target_id:${matchedField.tag}/${matchedField.inputType}`,
+          destinationUrl: after.url,
+          destinationTitle: after.title,
+          stateChanged,
+          visibleTextSnippet: after.textSnippet
+        };
+      }
+
       return {
         success: true,
-        note: `Filled '${target}'`,
-        matchedBy: `fillable-field:${matchedField.tag}/${matchedField.inputType}`,
+        note: stateChanged ? `Filled '${target || targetId}'` : `Field '${target || targetId}' already held the requested value`,
+        matchedBy: `target_id:${matchedField.tag}/${matchedField.inputType}`,
         destinationUrl: after.url,
         destinationTitle: after.title,
+        stateChanged,
         visibleTextSnippet: after.textSnippet
       };
     }

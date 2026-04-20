@@ -10,6 +10,18 @@ import {
   type Page
 } from "playwright";
 import { clampRunDurationMs, config } from "../config.js";
+import {
+  buildFormFieldKey,
+  buildSupplementalAccessProfile,
+  findMatchingSelectOption,
+  fitValueToField
+} from "../core/formHeuristics.js";
+import {
+  buildLooseAccessiblePattern,
+  prepareLocatorForInteraction,
+  resolvePreferredFieldLocator,
+  typeLikeHuman
+} from "../core/interaction.js";
 import { ensureDir, writeJson } from "../utils/files.js";
 import { captureInboxCheckpoint, waitForVerificationEmail, type InboxCheckpoint } from "./inbox.js";
 import {
@@ -19,6 +31,7 @@ import {
   resolveAuthSessionStatePath,
   type AuthIdentity
 } from "./profile.js";
+import { installPlaywrightPageCompat } from "../utils/playwrightCompat.js";
 
 type AuthEvent = {
   type: string;
@@ -74,6 +87,17 @@ type AuthFieldKind =
   | "postalCode"
   | "country"
   | "company"
+  | "dateOfBirth"
+  | "birthDay"
+  | "birthMonth"
+  | "birthYear"
+  | "age"
+  | "website"
+  | "occupation"
+  | "bio"
+  | "message"
+  | "pronouns"
+  | "gender"
   | "otp";
 
 type AuthStatus = "authenticated" | "partial_success" | "failed";
@@ -298,11 +322,18 @@ async function firstVisible(
 }
 
 function buildActionLocators(page: Page, labels: string[]): Array<{ locator: Locator; label: string; strategy: string }> {
-  return labels.flatMap((label) => [
-    { locator: page.getByRole("button", { name: label, exact: false }), label, strategy: "getByRole(button)" },
-    { locator: page.getByRole("link", { name: label, exact: false }), label, strategy: "getByRole(link)" },
-    { locator: page.getByText(label, { exact: false }), label, strategy: "getByText" }
-  ]);
+  return labels.flatMap((label) => {
+    const pattern = buildLooseAccessiblePattern(label);
+    if (!pattern) {
+      return [];
+    }
+
+    return [
+      { locator: page.getByRole("button", { name: pattern }), label, strategy: "getByRole(button)" },
+      { locator: page.getByRole("link", { name: pattern }), label, strategy: "getByRole(link)" },
+      { locator: page.getByText(pattern), label, strategy: "getByText" }
+    ];
+  });
 }
 
 async function clickFirstMatchingAction(args: {
@@ -323,9 +354,10 @@ async function clickFirstMatchingAction(args: {
 
   const before = await readVisibleSnapshot(args.page);
   const startedAt = Date.now();
+  const preparedLocator = await prepareLocatorForInteraction(match.locator);
 
-  await match.locator.click({ timeout: 5000 }).catch(async () => {
-    await match.locator.click({ force: true, timeout: 5000 });
+  await preparedLocator.click({ timeout: 5000 }).catch(async () => {
+    await preparedLocator.click({ force: true, timeout: 5000 });
   });
   await args.page.waitForLoadState("domcontentloaded").catch(() => undefined);
   await args.page.waitForTimeout(config.actionDelayMs);
@@ -525,13 +557,15 @@ async function collectVisibleCheckboxes(page: Page): Promise<VisibleCheckbox[]> 
 }
 
 function buildFieldKey(field: VisibleField): string {
-  return normalizeText(
-    [field.label, field.placeholder, field.name, field.id, field.autocomplete, field.inputType, field.inputMode].join(" ").toLowerCase()
-  );
+  return buildFormFieldKey(field);
 }
 
 function inferFieldKind(field: VisibleField): AuthFieldKind | null {
   const key = buildFieldKey(field);
+
+  if (/credit card|cardholder|card number|\bcvv\b|\bcvc\b|expiry|expiration|mm\/yy|mm-yy/.test(key)) {
+    return null;
+  }
 
   if (field.autocomplete === "one-time-code" || /otp|one[- ]?time|verification|passcode|security code|auth code/.test(key)) {
     return "otp";
@@ -597,14 +631,65 @@ function inferFieldKind(field: VisibleField): AuthFieldKind | null {
     return "company";
   }
 
+  if (
+    field.autocomplete === "bday" ||
+    /date of birth|dob|birthday/.test(key) ||
+    (field.inputType === "date" && !/arrival|departure|check[- ]?in|check[- ]?out|appointment|delivery|pickup|schedule/.test(key))
+  ) {
+    return "dateOfBirth";
+  }
+
+  if (field.autocomplete === "bday-day" || /(?:birth|dob|bday).*(?:day)|day of birth/.test(key)) {
+    return "birthDay";
+  }
+
+  if (field.autocomplete === "bday-month" || /(?:birth|dob|bday).*(?:month)|month of birth/.test(key)) {
+    return "birthMonth";
+  }
+
+  if (field.autocomplete === "bday-year" || /(?:birth|dob|bday).*(?:year)|year of birth/.test(key)) {
+    return "birthYear";
+  }
+
+  if (/\bage\b|years?\b|how old/.test(key)) {
+    return "age";
+  }
+
+  if (field.inputType === "url" || /website|url|portfolio|linkedin|homepage/.test(key)) {
+    return "website";
+  }
+
+  if (/occupation|job title|profession|role|what do you do/.test(key)) {
+    return "occupation";
+  }
+
+  if (/bio|about|summary|description|introduce yourself|tell us about yourself/.test(key)) {
+    return "bio";
+  }
+
+  if (/message|why are you interested|why do you want|comment|notes?/.test(key)) {
+    return "message";
+  }
+
+  if (/pronouns?/.test(key)) {
+    return "pronouns";
+  }
+
+  if (/gender|sex/.test(key)) {
+    return "gender";
+  }
+
   return null;
 }
 
-function fieldValueForKind(kind: AuthFieldKind, identity: AuthIdentity, otpCode?: string): string | undefined {
+function fieldValueForKind(kind: AuthFieldKind, field: VisibleField, identity: AuthIdentity, otpCode?: string): string | undefined {
+  const supplemental = buildSupplementalAccessProfile(identity);
+
   switch (kind) {
     case "email":
-    case "username":
       return identity.email;
+    case "username":
+      return supplemental.username;
     case "password":
     case "confirmPassword":
       return identity.password;
@@ -630,6 +715,28 @@ function fieldValueForKind(kind: AuthFieldKind, identity: AuthIdentity, otpCode?
       return identity.country;
     case "company":
       return identity.company;
+    case "dateOfBirth":
+      return supplemental.birthDateIso;
+    case "birthDay":
+      return supplemental.birthDay;
+    case "birthMonth":
+      return field.tag === "select" ? supplemental.birthMonthName : supplemental.birthMonthNumber;
+    case "birthYear":
+      return supplemental.birthYear;
+    case "age":
+      return supplemental.age;
+    case "website":
+      return supplemental.website;
+    case "occupation":
+      return supplemental.occupation;
+    case "bio":
+      return fitValueToField(field, supplemental.bio);
+    case "message":
+      return fitValueToField(field, supplemental.message);
+    case "pronouns":
+      return supplemental.pronouns;
+    case "gender":
+      return supplemental.gender;
     case "otp":
       return otpCode;
     default:
@@ -650,6 +757,7 @@ function fieldAllowedInPhase(kind: AuthFieldKind, phase: "signup" | "login" | "o
 }
 
 async function selectOption(locator: Locator, field: VisibleField, value: string): Promise<void> {
+  const preparedLocator = await prepareLocatorForInteraction(locator);
   const desiredOptions = [value];
   if (field.options.some((option) => option.toLowerCase() === "united states of america")) {
     desiredOptions.push("United States of America");
@@ -657,16 +765,16 @@ async function selectOption(locator: Locator, field: VisibleField, value: string
 
   for (const desired of desiredOptions) {
     try {
-      await locator.selectOption({ label: desired });
+      await preparedLocator.selectOption({ label: desired });
       return;
     } catch {
       // continue
     }
   }
 
-  const matchingOption = field.options.find((option) => normalizeText(option).toLowerCase() === normalizeText(value).toLowerCase());
+  const matchingOption = findMatchingSelectOption(field.options, desiredOptions);
   if (matchingOption) {
-    await locator.selectOption({ label: matchingOption });
+    await preparedLocator.selectOption({ label: matchingOption });
     return;
   }
 
@@ -689,7 +797,7 @@ async function fillFields(args: {
       continue;
     }
 
-    const value = fieldValueForKind(kind, args.identity, args.otpCode);
+    const value = fieldValueForKind(kind, field, args.identity, args.otpCode);
     if (!value) {
       continue;
     }
@@ -699,18 +807,26 @@ async function fillFields(args: {
       continue;
     }
 
-    const locator = args.page.locator(`[data-site-agent-auth-field="${field.marker}"]`);
+    const fallbackLocator = args.page.locator(`[data-site-agent-auth-field="${field.marker}"]`).first();
     try {
+      const resolvedField = await resolvePreferredFieldLocator({
+        page: args.page,
+        field,
+        fallbackLocator,
+        preferredNames: [field.label, field.placeholder, kind]
+      });
+
       if (field.tag === "select") {
-        await selectOption(locator, field, value);
+        await selectOption(resolvedField.locator, field, value);
       } else {
-        await locator.fill(value);
+        await typeLikeHuman(resolvedField.locator, fitValueToField(field, value));
       }
 
       filledCount += 1;
       pushEvent(args.events, `${args.phase}_field_filled`, `Filled ${kind} field '${field.label || field.name || field.id || field.placeholder}'.`, {
         fieldKind: kind,
-        fieldLabel: field.label || field.name || field.id || field.placeholder
+        fieldLabel: field.label || field.name || field.id || field.placeholder,
+        strategy: resolvedField.strategy
       });
     } catch (error) {
       pushEvent(
@@ -743,8 +859,9 @@ async function checkRequiredBoxes(page: Page, events: AuthEvent[]): Promise<numb
       continue;
     }
 
-    const locator = page.locator(`[data-site-agent-auth-checkbox="${checkbox.marker}"]`);
-    await locator.check({ force: true }).catch(() => undefined);
+    const locator = page.locator(`[data-site-agent-auth-checkbox="${checkbox.marker}"]`).first();
+    const preparedLocator = await prepareLocatorForInteraction(locator).catch(() => locator);
+    await preparedLocator.check({ force: true }).catch(() => undefined);
     checkedCount += 1;
     pushEvent(events, "signup_checkbox_checked", `Checked '${checkbox.label || "required checkbox"}'.`, {
       label: checkbox.label
@@ -1405,6 +1522,7 @@ export async function runAuthFlow(options: {
   try {
     browser = await chromium.launch(await resolveLaunchOptions({ headed: options.headed }));
     context = await browser.newContext(contextOptions);
+    await installPlaywrightPageCompat(context);
     const page = await context.newPage();
     const execution = await runAuthFlowInContext({
       page,

@@ -394,6 +394,7 @@ export function createAggregateRun(submission: Submission, results: CompletedAge
     headed: submission.headed,
     mobile: submission.mobile,
     ignoreHttpsErrors: submission.ignoreHttpsErrors,
+    llmProvider: config.llmProvider,
     model: config.model,
     startedAt: aggregateStartedAt,
     maxRunDurationMs: config.maxSessionDurationMs,

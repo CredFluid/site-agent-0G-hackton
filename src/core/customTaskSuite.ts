@@ -1,5 +1,15 @@
 import { TaskSuiteSchema, type TaskSuite } from "../schemas/types.js";
 import { classifyTaskText, inferGameplayConfigFromTask } from "./taskHeuristics.js";
+import { parseTaskDirectives } from "./taskDirectives.js";
+
+const RUN_WIDE_CONSTRAINT_PATTERNS = [
+  /^(?:do not|don't|never|avoid|without)\b/i,
+  /^stop before\b/i,
+  /^(?:no more than|at most)\b/i,
+  /^(?:use|keep using|reuse)\s+(?:the\s+)?same\b/i,
+  /^(?:only create|create only)\b/i,
+  /\b(?:single|same|one)\s+(?:profile|account|identity)\b/i
+];
 
 function buildTaskName(task: string, index: number): string {
   const firstClause = task.split(/[.!?]/, 1)[0]?.trim() || task;
@@ -24,29 +34,86 @@ function buildPersonaName(tasks: string[]): string {
   return `Task-focused visitor: ${firstTask} + ${tasks.length - 1} more`;
 }
 
+function isRunWideConstraint(task: string): boolean {
+  return RUN_WIDE_CONSTRAINT_PATTERNS.some((pattern) => pattern.test(task.trim()));
+}
+
+function partitionTaskDirectives(tasks: string[]): {
+  actionTasks: string[];
+  runWideConstraints: string[];
+} {
+  const actionTasks: string[] = [];
+  const runWideConstraints: string[] = [];
+
+  for (const task of tasks) {
+    if (isRunWideConstraint(task)) {
+      runWideConstraints.push(task);
+      continue;
+    }
+
+    actionTasks.push(task);
+  }
+
+  return { actionTasks, runWideConstraints };
+}
+
+function collapseSequentialFormFlowTasks(tasks: string[]): string[] {
+  if (tasks.length < 2 || tasks.length > 6) {
+    return tasks;
+  }
+
+  const directivesByTask = tasks.map((task) => parseTaskDirectives(task));
+  if (directivesByTask.some((directives) => directives.length === 0)) {
+    return tasks;
+  }
+
+  const flattenedDirectives = directivesByTask.flat();
+  const includesFormFlowStep = flattenedDirectives.some(
+    (directive) => directive.action === "fill_visible_form" || directive.action === "type_field" || directive.action === "submit"
+  );
+
+  if (!includesFormFlowStep) {
+    return tasks;
+  }
+
+  return [tasks.join("; ")];
+}
+
 export function buildCustomTaskSuite(tasks: string[]): TaskSuite {
+  const { actionTasks, runWideConstraints } = partitionTaskDirectives(tasks);
+  const collapsedActionTasks = collapseSequentialFormFlowTasks(actionTasks);
+  const effectiveTasks = collapsedActionTasks.length > 0 ? collapsedActionTasks : tasks;
+  const globalConstraintNotes =
+    actionTasks.length > 0
+      ? runWideConstraints.map((constraint) => `Run-wide user constraint: ${constraint}`)
+      : [];
+
   return TaskSuiteSchema.parse({
     persona: {
-      name: buildPersonaName(tasks),
+      name: buildPersonaName(effectiveTasks),
       intent:
-        `Visit the supplied website like a realistic, attentive human who first understands what the site appears to be for, then completes only the submitted tasks. Let the submitted task list set your priorities instead of any predefined agent profile. Requested tasks: ${tasks.join(" | ")}`,
+        `Visit the supplied website like a realistic, attentive human who first understands what the site appears to be for, then completes only the submitted tasks. Let the submitted task list set your priorities instead of any predefined agent profile. Requested tasks: ${effectiveTasks.join(" | ")}${
+          globalConstraintNotes.length > 0 ? ` Run-wide constraints: ${runWideConstraints.join(" | ")}` : ""
+        }`,
       constraints: [
         "First understand what the supplied site appears to help users do before attempting the accepted tasks.",
         "Use the provided task list as the primary navigation plan for the visit.",
+        "Treat any run-wide user constraint as a hard guardrail that cannot be violated to satisfy a later task.",
         "Do not assume a predefined agent personality or profile beyond what the submitted tasks require.",
         "Use the site understanding only to interpret the accepted tasks, not to invent new ones.",
         "Use only visible page information and honest interaction evidence.",
         "Behave like a realistic first-time visitor rather than a rigid script runner.",
-        "When a task is ambiguous, choose the most reasonable visible path and explain that choice through the recorded evidence.",
+        "When a task contains explicit named controls or ordered action verbs, follow those literally in order. Only choose a reasonable visible path when the user did not specify the next step.",
         "Confirm whether the requested destination, content, or state actually appears before claiming success.",
         "If a task stalls, dead-ends, loops, or becomes misleading, verify that before moving on.",
         "Do not enter personal, financial, or secret information.",
         "Use harmless test input only when typing is necessary to evaluate a public interaction safely.",
         "Record blockers honestly when a task requires login, payment, invite-only access, or other gated access.",
-        "Give a direct, evidence-based account of which requested tasks worked, partially worked, or failed."
+        "Give a direct, evidence-based account of which requested tasks worked, partially worked, or failed.",
+        ...globalConstraintNotes
       ]
     },
-    tasks: tasks.map((task, index) => {
+    tasks: effectiveTasks.map((task, index) => {
       const taskProfile = classifyTaskText(task);
       const gameplay = inferGameplayConfigFromTask(task);
       const successCondition =
@@ -63,6 +130,7 @@ export function buildCustomTaskSuite(tasks: string[]): TaskSuite {
         "the task requires login, payment, or private information before a safe stopping point",
         "the expected page, content, or success state never clearly appears",
         "the final output cannot clearly explain what happened when attempting the task",
+        ...(globalConstraintNotes.length > 0 ? ["the run violates a run-wide user constraint while attempting this task"] : []),
         ...(taskProfile.engagement
           ? ["the run never produces clear evidence of meaningful interaction with the live controls"]
           : []),

@@ -231,9 +231,18 @@ export function scoreInteractiveForTask(args: {
   history: TaskHistoryEntry[];
 }): number {
   const taskProfile = classifyTaskText(args.task.goal);
-  const label = normalizeTaskText(args.item.text || args.item.href || "");
+  const label = normalizeTaskText(args.item.text || "");
   if (!label || args.item.disabled) {
     return Number.NEGATIVE_INFINITY;
+  }
+
+  const attemptedTargetIds = new Set(
+    args.history
+      .map((entry) => normalizeTaskText(entry.decision.target_id || ""))
+      .filter(Boolean)
+  );
+  if (attemptedTargetIds.has(args.item.agentId)) {
+    return -1000;
   }
 
   const attemptedTargets = new Set(

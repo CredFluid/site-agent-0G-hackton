@@ -4,7 +4,7 @@ A production-ready browser agent that tests a website like a normal user and pro
 
 It uses:
 - **Playwright** for browser automation and resilient user-facing locators
-- **OpenAI** (default model: `gpt-5`) for agent planning and structured evaluation
+- **OpenAI or Ollama** for agent planning and structured evaluation
 - **axe-core for Playwright** for accessibility checks
 - **sharp** and **node-webpmux** for animated WebP click-replay generation
 - **Netlify Blobs** for serverless artifact and submission storage
@@ -54,11 +54,13 @@ npm install
 npm run browser:install
 ```
 
-3. Create your environment file and set your API key
+3. Create your environment file and choose an LLM provider
 
 ```bash
 cp .env.example .env
-# then set OPENAI_API_KEY=your_openai_api_key_here in .env
+# then either:
+# - keep LLM_PROVIDER=openai and set OPENAI_API_KEY=your_openai_api_key_here
+# - or set LLM_PROVIDER=ollama and choose an installed OLLAMA_MODEL
 ```
 
 4. Run the agent against a site
@@ -128,6 +130,12 @@ Notes:
 # Basic run with one task
 npm run dev -- --url https://example.com --task "Open pricing and compare the visible plans before signup"
 
+# Local Ollama run
+npm run dev -- --url http://127.0.0.1:3000 --task "Open pricing and compare the visible plans before signup" --llm-provider ollama --model llama3.1:8b
+
+# Switch back to OpenAI for internet-facing runs
+npm run dev -- --url https://example.com --task "Open pricing and compare the visible plans before signup" --llm-provider openai --model gpt-5
+
 # Headed mode
 npm run dev -- --url https://example.com --task "Open pricing and compare the visible plans before signup" --headed
 
@@ -195,6 +203,36 @@ Optional auth environment variables:
 - `AUTH_OTP_LENGTH` (default: 6), `AUTH_EMAIL_FROM_FILTER`, `AUTH_EMAIL_SUBJECT_FILTER`
 - `AUTH_SIGNUP_URL`, `AUTH_LOGIN_URL`, `AUTH_ACCESS_URL` (can be set in `.env` instead of passing CLI flags)
 - `AUTH_SESSION_STATE_PATH` — where to save the authenticated session JSON
+
+## LLM provider switching
+
+The agent supports both OpenAI and Ollama.
+
+Environment variables:
+- `LLM_PROVIDER` — `openai` or `ollama`
+- `OPENAI_API_KEY` — required only when using `openai`
+- `OPENAI_MODEL` — defaults to `gpt-5`
+- `OLLAMA_BASE_URL` — defaults to `http://127.0.0.1:11434`
+- `OLLAMA_MODEL` — defaults to `llama3.1:8b`
+
+CLI overrides:
+- `--llm-provider openai|ollama`
+- `--model <name>`
+- `--ollama-base-url <url>`
+
+Examples:
+
+```bash
+# Use Ollama against a local site
+npm run dev -- --url http://127.0.0.1:3000 --task "Check the homepage CTA" --llm-provider ollama --model llama3.1:8b
+
+# Use OpenAI against a public site
+npm run dev -- --url https://example.com --task "Open pricing" --llm-provider openai --model gpt-5
+```
+
+Notes:
+- Ollama is most useful for local development and private staging pages where you do not want to depend on OpenAI.
+- Netlify or other hosted environments will still need a reachable LLM endpoint. Ollama is only a good fit there if that runtime can actually reach your Ollama host.
 
 ## Legitimate session reuse
 

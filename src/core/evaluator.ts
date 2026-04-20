@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { generateStructured } from "../llm/client.js";
+import { generateStructured, type LlmRuntimeOptions } from "../llm/client.js";
 import { TASK_OUTCOME_ANALYST_PROMPT } from "../prompts/reviewer.js";
 import { buildFallbackReport } from "./fallbackReport.js";
 import { deriveGameplaySummary } from "./gameplaySummary.js";
@@ -170,6 +170,7 @@ export async function evaluateRun(args: {
   mobile?: boolean;
   timeoutMs?: number;
   totalRunDurationMs?: number;
+  llm?: LlmRuntimeOptions;
 }): Promise<FinalReport> {
   const totalRunDurationSeconds = Math.round((args.totalRunDurationMs ?? config.maxSessionDurationMs) / 1000);
   const distilledTaskResults = args.taskResults.map((taskResult) => distillTaskResult(taskResult));
@@ -233,6 +234,7 @@ export async function evaluateRun(args: {
 
   try {
     const report = await generateStructured<FinalReport>({
+      ...(args.llm ?? {}),
       systemPrompt: TASK_OUTCOME_ANALYST_PROMPT,
       userPayload: payload,
       schemaName: "final_report",
