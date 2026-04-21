@@ -208,7 +208,9 @@ npm run dev -- --url https://example.com \
 5. Verifies a protected page (if `--access-url` is provided)
 6. Saves the authenticated session to `.auth/session.json`
 
-Auth walls detected mid-task are handled automatically when `AUTH_TEST_EMAIL` and `AUTH_TEST_PASSWORD` are configured.
+Successful auth also caches the working identity in `.auth/credentials.json`, keyed by target origin, so later runs against the same site can reuse the saved username or email plus password.
+
+Auth walls detected mid-task are handled automatically when auth credentials are configured or a working identity has already been cached for that target origin.
 
 ### Auth-Only Mode
 
@@ -236,12 +238,16 @@ PLAYWRIGHT_STORAGE_STATE_PATH=.auth/session.json
 
 ### Auth Environment Variables
 
-**Required** (when using `--auth-flow` or `--auth-only`):
+**Required for a fresh auth bootstrap** (not needed when the target origin already has cached credentials):
 
 | Variable | Description |
 |---|---|
 | `AUTH_TEST_EMAIL` | Email address for signup/login |
 | `AUTH_TEST_PASSWORD` | Password for signup/login |
+
+**Optional login field:**
+
+`AUTH_TEST_USERNAME`
 
 **IMAP inbox** (for OTP/verification email polling):
 

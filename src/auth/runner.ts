@@ -24,6 +24,7 @@ import {
 } from "../core/interaction.js";
 import { ensureDir, writeJson } from "../utils/files.js";
 import { captureInboxCheckpoint, waitForVerificationEmail, type InboxCheckpoint } from "./inbox.js";
+import { saveStoredIdentity } from "./credentialStore.js";
 import {
   authSettings,
   createAuthIdentityPlan,
@@ -1118,9 +1119,17 @@ async function driveSignup(args: {
   events: AuthEvent[];
   mailboxCheckpoint?: InboxCheckpoint | undefined;
 }): Promise<{ checkpoint: InboxCheckpoint | undefined; identity: AuthIdentity }> {
-  const identityPlan = createAuthIdentityPlan();
+  const identityPlan = createAuthIdentityPlan(args.baseUrl);
   let checkpoint = args.mailboxCheckpoint;
   let activeIdentity = identityPlan.identities[0]!;
+
+  if (identityPlan.source === "stored") {
+    pushEvent(args.events, "stored_identity_loaded", "Loaded saved credentials for this target origin and will reuse them during auth.", {
+      credentialScope: new URL(args.baseUrl).origin,
+      accountEmail: activeIdentity.email,
+      accountUsername: activeIdentity.username ?? null
+    });
+  }
 
   for (const [index, identity] of identityPlan.identities.entries()) {
     activeIdentity = identity;
@@ -1188,7 +1197,8 @@ async function handleVerification(args: {
   const message = await waitForVerificationEmail({
     mailbox,
     checkpoint: effectiveCheckpoint,
-    siteHost
+    siteHost,
+    recipientEmail: args.identity.email
   });
 
   pushEvent(args.events, "verification_email_received", `Received verification email '${message.subject}'.`, {
@@ -1270,7 +1280,7 @@ async function confirmAccess(args: {
   page: Page;
   accessUrl?: string | undefined;
   events: AuthEvent[];
-}): Promise<boolean> {
+}): Promise<{ snapshot: VisibleSnapshot; authenticated: boolean; accessConfirmed: boolean }> {
   if (args.accessUrl) {
     await gotoUrl(args.page, args.accessUrl, args.events, "access_navigation");
   }
@@ -1291,7 +1301,7 @@ async function confirmAccess(args: {
     }
   );
 
-  return accessConfirmed;
+  return { snapshot, authenticated, accessConfirmed };
 }
 
 async function saveStorageState(args: {
@@ -1368,11 +1378,20 @@ async function executeAuthFlowInContext(args: {
     events: args.events
   });
 
-  const accessConfirmed = await confirmAccess({
+  const accessCheck = await confirmAccess({
     page: args.page,
     accessUrl: args.accessUrl,
     events: args.events
   });
+
+  if (accessCheck.authenticated) {
+    saveStoredIdentity(args.baseUrl, identity);
+    pushEvent(args.events, "stored_identity_saved", "Saved the successful credentials for this target origin for future reuse.", {
+      credentialScope: new URL(args.baseUrl).origin,
+      accountEmail: identity.email,
+      accountUsername: identity.username ?? null
+    });
+  }
 
   if (args.saveStorageStatePath) {
     savedStorageStatePath = await saveStorageState({
@@ -1382,13 +1401,13 @@ async function executeAuthFlowInContext(args: {
     });
   }
 
-  const snapshot = await readVisibleSnapshot(args.page);
+  const snapshot = accessCheck.snapshot;
   return {
     result: {
-      status: accessConfirmed ? "authenticated" : "partial_success",
+      status: accessCheck.accessConfirmed ? "authenticated" : "partial_success",
       finalUrl: snapshot.url,
       finalTitle: snapshot.title,
-      accessConfirmed,
+      accessConfirmed: accessCheck.accessConfirmed,
       verificationMethod,
       runDir: args.runDir,
       ...(savedStorageStatePath ? { savedStorageStatePath } : {})

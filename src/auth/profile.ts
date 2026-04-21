@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import path from "node:path";
 import { z } from "zod";
 import { config } from "../config.js";
+import { getStoredIdentity, hasStoredIdentity } from "./credentialStore.js";
 
 dotenv.config();
 
@@ -14,6 +15,10 @@ function normalizeOptionalString(value: string | undefined): string | undefined 
 
 const AuthEnvSchema = z.object({
   AUTH_TEST_EMAIL: z
+    .string()
+    .optional()
+    .transform((value: string | undefined) => normalizeOptionalString(value)),
+  AUTH_TEST_USERNAME: z
     .string()
     .optional()
     .transform((value: string | undefined) => normalizeOptionalString(value)),
@@ -106,6 +111,10 @@ const AuthEnvSchema = z.object({
   AUTH_SESSION_STATE_PATH: z
     .string()
     .optional()
+    .transform((value: string | undefined) => normalizeOptionalString(value)),
+  AUTH_EMAIL_DOMAIN: z
+    .string()
+    .optional()
     .transform((value: string | undefined) => normalizeOptionalString(value))
 });
 
@@ -167,6 +176,7 @@ const HARD_CODED_AGENT_IDENTITIES: AgentIdentityTemplate[] = [
 
 export type AuthIdentity = {
   email: string;
+  username?: string | undefined;
   password: string;
   firstName: string;
   lastName: string;
@@ -184,6 +194,7 @@ export type AuthIdentity = {
 export type AuthIdentityPlan = {
   maxAttempts: number;
   identities: AuthIdentity[];
+  source: "stored" | "configured";
 };
 
 const generatedAccessIdentities = new Map<number, AuthIdentity>();
@@ -225,6 +236,10 @@ function resolveAgentIdentityTemplate(args?: AccessIdentityContext): AgentIdenti
 
 function buildScopedEmail(baseEmail: string | undefined, template: AgentIdentityTemplate): string {
   if (!baseEmail) {
+    if (parsed.AUTH_EMAIL_DOMAIN) {
+      const seed = crypto.randomBytes(4).toString("hex");
+      return `${template.emailLocalPart}-${seed}@${parsed.AUTH_EMAIL_DOMAIN}`;
+    }
     return `${template.emailLocalPart}@example.com`;
   }
 
@@ -249,8 +264,8 @@ export function getAccessIdentityLabel(context?: AccessIdentityContext): string 
   return `${template.firstName} ${template.lastName}`;
 }
 
-export function isAuthBootstrapConfigured(): boolean {
-  return Boolean(parsed.AUTH_TEST_EMAIL && parsed.AUTH_TEST_PASSWORD);
+export function isAuthBootstrapConfigured(url?: string): boolean {
+  return Boolean((url && hasStoredIdentity(url)) || (parsed.AUTH_TEST_EMAIL && parsed.AUTH_TEST_PASSWORD));
 }
 
 export function requireAuthIdentity(): AuthIdentity {
@@ -266,6 +281,7 @@ export function requireAuthIdentity(): AuthIdentity {
 
   return {
     email: buildScopedEmail(parsed.AUTH_TEST_EMAIL, template),
+    username: parsed.AUTH_TEST_USERNAME,
     password: parsed.AUTH_TEST_PASSWORD,
     firstName: template.firstName,
     lastName: template.lastName,
@@ -334,6 +350,7 @@ function buildVariantIdentity(baseIdentity: AuthIdentity, attempt: number, retry
 
   return {
     email: buildVariantEmail(baseIdentity.email, attempt, retrySeed),
+    username: baseIdentity.username,
     password: baseIdentity.password,
     firstName: baseIdentity.firstName,
     lastName: baseIdentity.lastName,
@@ -349,18 +366,37 @@ function buildVariantIdentity(baseIdentity: AuthIdentity, attempt: number, retry
   };
 }
 
-export function createAuthIdentityPlan(): AuthIdentityPlan {
+export function createAuthIdentityPlan(url?: string): AuthIdentityPlan {
+  if (url) {
+    const storedIdentity = getStoredIdentity(url);
+    if (storedIdentity) {
+      return {
+        maxAttempts: 1,
+        identities: [storedIdentity],
+        source: "stored"
+      };
+    }
+  }
+
   const baseIdentity = requireAuthIdentity();
   const retrySeed = buildRetrySeed();
   const maxAttempts = authSettings.generatedIdentityMaxAttempts;
 
   return {
     maxAttempts,
-    identities: Array.from({ length: maxAttempts }, (_, index) => buildVariantIdentity(baseIdentity, index + 1, retrySeed))
+    identities: Array.from({ length: maxAttempts }, (_, index) => buildVariantIdentity(baseIdentity, index + 1, retrySeed)),
+    source: "configured"
   };
 }
 
-export function getPreferredAccessIdentity(): AuthIdentity {
+export function getPreferredAccessIdentity(url?: string): AuthIdentity {
+  if (url) {
+    const storedIdentity = getStoredIdentity(url);
+    if (storedIdentity) {
+      return storedIdentity;
+    }
+  }
+
   if (isAuthBootstrapConfigured()) {
     return requireAuthIdentity();
   }
@@ -371,9 +407,12 @@ export function getPreferredAccessIdentity(): AuthIdentity {
   if (!generatedAccessIdentities.has(agentSlot)) {
     const retrySeed = buildRetrySeed();
     const template = resolveAgentIdentityTemplate(context);
+    const emailDomain = parsed.AUTH_EMAIL_DOMAIN;
 
     generatedAccessIdentities.set(agentSlot, {
-      email: `${template.emailLocalPart}+${retrySeed}@example.com`,
+      email: emailDomain
+        ? `${template.emailLocalPart}-${retrySeed}@${emailDomain}`
+        : `${template.emailLocalPart}+${retrySeed}@example.com`,
       password: `SiteAgent!${retrySeed.slice(0, 4)}9`,
       firstName: template.firstName,
       lastName: template.lastName,

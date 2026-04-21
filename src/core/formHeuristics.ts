@@ -74,7 +74,7 @@ function buildFallbackUsername(identity: AuthIdentity): string {
 
 export function buildSupplementalAccessProfile(identity: AuthIdentity): SupplementalAccessProfile {
   return {
-    username: buildFallbackUsername(identity),
+    username: identity.username?.trim() || buildFallbackUsername(identity),
     age: "24",
     website: "https://example.com",
     occupation: "QA analyst",

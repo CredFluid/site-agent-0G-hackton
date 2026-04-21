@@ -49,8 +49,9 @@ npm run dev -- --url https://example.com --auth-only --signup-url /register --lo
 ```
 
 This writes `auth-flow.json` into the run directory and saves the authenticated `storageState` so future runs can reuse it directly.
+It also caches the working username or email plus password in `.auth/credentials.json` for that target origin, so later runs can reuse the same login details automatically.
 
-If your auth mailbox settings are already configured, a normal task run can also recover mid-session now: when the agent hits a real login or registration wall, it can attempt signup/login in the same browser session and retry with fresh dummy details if the site says the account already exists.
+If auth credentials are configured, or the site already has a cached working identity for that origin, a normal task run can also recover mid-session now: when the agent hits a real login or registration wall, it can attempt signup/login in the same browser session and retry with fresh dummy details if the site says the account already exists.
 
 ## 6. Read the task output correctly
 

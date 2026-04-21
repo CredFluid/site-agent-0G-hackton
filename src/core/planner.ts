@@ -48,11 +48,13 @@ const ACCESS_GATE_PATTERNS = [
 ];
 const ACCOUNT_CREATION_TASK_PATTERN = /\b(?:sign ?up|signup|register|create(?:\s+your)?\s+(?:account|profile)|create\s+my\s+account|join)\b/i;
 const ACCOUNT_CREATION_SUCCESS_PATTERN =
-  /\b(?:registered users?|add another registration|account created|account ready|welcome|dashboard|verify your email|check your email|profile active|view live market screen)\b/i;
+  /\b(?:registered users?|add another registration|account created|account ready|welcome|dashboard|profile active|view live market screen)\b/i;
 const ACCOUNT_CREATION_STRONG_SUCCESS_PATTERN =
-  /\b(?:registered users?|add another registration|account created|account ready|verify your email|check your email|profile active|view live market screen)\b/i;
+  /\b(?:registered users?|add another registration|account created|account ready|profile active|view live market screen)\b/i;
 const ACCOUNT_CREATION_LOCAL_ONLY_PATTERN =
   /\b(?:browser fallback|browser storage only|using browser storage only|local server is unavailable|api is unavailable)\b/i;
+const ACCOUNT_CREATION_VERIFICATION_PENDING_PATTERN =
+  /\b(?:please\s+verify|verify\s+your\s+email|check\s+your\s+email|send\s+otp|enter\s+(?:the\s+)?(?:code|otp)|verification\s+code|resend\s*\(\d+\s*s\))\b/i;
 
 const PlannerInputSchema = z.object({
   persona: z.object({
@@ -432,6 +434,10 @@ function taskLooksLikeAccountCreation(goal: string): boolean {
 
 function pageShowsAccountCreationSuccess(pageState: PageState): boolean {
   const blob = normalizeTaskText([pageState.title, pageState.visibleText, ...pageState.headings].join(" "));
+  if (ACCOUNT_CREATION_VERIFICATION_PENDING_PATTERN.test(blob)) {
+    return false;
+  }
+
   if (ACCOUNT_CREATION_STRONG_SUCCESS_PATTERN.test(blob)) {
     return true;
   }
@@ -441,6 +447,11 @@ function pageShowsAccountCreationSuccess(pageState: PageState): boolean {
   }
 
   return ACCOUNT_CREATION_SUCCESS_PATTERN.test(blob);
+}
+
+function pageShowsAccountCreationVerificationPending(pageState: PageState): boolean {
+  const blob = normalizeTaskText([pageState.title, pageState.visibleText, ...pageState.headings].join(" "));
+  return ACCOUNT_CREATION_VERIFICATION_PENDING_PATTERN.test(blob);
 }
 
 function pageShowsAccountCreationLocalOnlyFallback(pageState: PageState): boolean {
@@ -655,8 +666,8 @@ function findMatchingFormField(pageState: PageState, instructionQuote: string): 
   return candidates[0]?.field ?? null;
 }
 
-function inferFormFieldValue(field: PageState["formFields"][number]): string | null {
-  return inferProfileFormFieldValue(field, getPreferredAccessIdentity());
+function inferFormFieldValue(field: PageState["formFields"][number], url?: string): string | null {
+  return inferProfileFormFieldValue(field, getPreferredAccessIdentity(url));
 }
 
 function resolveFormFieldTarget(field: PageState["formFields"][number]): string {
@@ -709,7 +720,7 @@ function findFirstPendingFormField(pageState: PageState): PageState["formFields"
       continue;
     }
 
-    const inferredValue = inferFormFieldValue(field);
+    const inferredValue = inferFormFieldValue(field, pageState.url);
     if (!inferredValue) {
       continue;
     }
@@ -837,7 +848,7 @@ function buildFormFirstDecision(args: {
   pendingField: PageState["formFields"][number];
   originalDecision: PlannerDecision;
 }): PlannerDecision {
-  const text = inferFormFieldValue(args.pendingField);
+  const text = inferFormFieldValue(args.pendingField, args.pageState.url);
   const target = resolveFormFieldTarget(args.pendingField);
   const stepReference = findFormFieldStepReference({
     pageState: args.pageState,
@@ -945,7 +956,7 @@ function enforceOrderedTaskDirectives(args: {
         continue;
       }
 
-      const value = inferFormFieldValue(field);
+      const value = inferFormFieldValue(field, args.pageState.url);
       if (!value) {
         return buildStopDecision({
           thought: `The next literal user instruction is to fill '${directive.target}', but there is no safe inferred value for that visible field.`,
@@ -1131,10 +1142,72 @@ function buildFallbackDecision(args: {
     });
   }
 
+  if (
+    taskLooksLikeAccountCreation(task.goal) &&
+    latestSuccessfulSubmit &&
+    pageShowsAccountCreationVerificationPending(args.pageState) &&
+    !taskHasPendingExplicitDirective(task.goal, args.history)
+  ) {
+    return buildStopDecision({
+      thought:
+        "Model planning was unavailable, but the signup flow is still explicitly requesting email or OTP verification after the last submit-style action, so the account is not complete yet.",
+      expectation: "Stop and report the pending verification state instead of navigating away or claiming signup success.",
+      friction: "medium"
+    });
+  }
+
   const pendingField = findFirstPendingFormField(args.pageState);
+
+  // Detect inline OTP-trigger buttons (e.g. "Send OTP", "Send Code", "Verify Email") that need
+  // to be clicked mid-form-fill, BEFORE continuing to fill remaining fields or submitting.
+  const emailFieldFilled = args.pageState.formFields.some((field) => {
+    const key = normalizeKey([field.label, field.placeholder, field.name, field.id, field.autocomplete].join(" "));
+    return /\bemail\b/.test(key) && field.value && field.value.trim().length > 0;
+  });
+
+  if (emailFieldFilled) {
+    const otpTriggerControl = args.pageState.interactive.find((item) => {
+      if (item.disabled) {
+        return false;
+      }
+
+      const label = normalizeKey(getInteractiveLabel(item));
+      return /\b(?:send\s*(?:otp|code)|get\s*(?:otp|code)|verify\s*email|request\s*(?:otp|code))\b/.test(label);
+    });
+
+    if (otpTriggerControl) {
+      const alreadyClicked = args.history.some(
+        (entry) =>
+          entry.decision.action === "click" &&
+          entry.result.success &&
+          normalizeKey(entry.decision.target || "").includes(normalizeKey(getInteractiveLabel(otpTriggerControl)))
+      );
+
+      if (!alreadyClicked) {
+        const target = resolveInteractiveTarget(otpTriggerControl);
+        const stepReference = findInteractiveStepReference({
+          pageState: args.pageState,
+          item: otpTriggerControl
+        });
+
+        return {
+          thought: "Model planning was unavailable, but the email field is filled and the page has a visible OTP/verification trigger button that must be clicked before proceeding with the rest of the form.",
+          stepNumber: stepReference.stepNumber,
+          instructionQuote: stepReference.instructionQuote,
+          action: "click",
+          target_id: otpTriggerControl.agentId,
+          target,
+          text: "",
+          expectation: `Click '${target}' to trigger email verification or OTP delivery, then wait for the page to respond before filling remaining fields.`,
+          friction: "medium"
+        };
+      }
+    }
+  }
+
   if (pendingField) {
     const target = resolveFormFieldTarget(pendingField);
-    const text = inferFormFieldValue(pendingField);
+    const text = inferFormFieldValue(pendingField, args.pageState.url);
     const stepReference = findFormFieldStepReference({
       pageState: args.pageState,
       field: pendingField
@@ -1164,7 +1237,7 @@ function buildFallbackDecision(args: {
   if (nextInstruction) {
     const matchingField = findMatchingFormField(args.pageState, nextInstruction.instructionQuote);
     if (matchingField) {
-      const formValue = inferFormFieldValue(matchingField);
+      const formValue = inferFormFieldValue(matchingField, args.pageState.url);
       if (formValue) {
         const target = resolveFormFieldTarget(matchingField);
         return {
@@ -1194,6 +1267,18 @@ function buildFallbackDecision(args: {
         return buildStopDecision({
           thought: `Model planning was unavailable, and '${directInteractiveTarget}' would violate a run-wide user constraint from the submission.`,
           expectation: `Stop instead of using '${directInteractiveTarget}' because it would break the accepted guardrail.`,
+          stepNumber: nextInstruction.stepNumber,
+          instructionQuote: nextInstruction.instructionQuote
+        });
+      }
+
+      // Block regressive navigation ("Back to Home", "Home", etc.) when the page
+      // still has a visible form — this prevents abandoning the signup mid-flow
+      // after an OTP timeout or validation error.
+      if (args.pageState.formsPresent && isRegressiveTaskControlLabel(directInteractiveTarget)) {
+        return buildStopDecision({
+          thought: `Model planning was unavailable, and '${directInteractiveTarget}' is a regressive navigation control while a form is still present on the page. Clicking it would abandon the current form flow.`,
+          expectation: `Stop instead of navigating away from the form via '${directInteractiveTarget}'.`,
           stepNumber: nextInstruction.stepNumber,
           instructionQuote: nextInstruction.instructionQuote
         });
@@ -1255,7 +1340,7 @@ function buildFallbackDecision(args: {
     const typeTarget = extractTypeTarget(nextInstruction.instructionQuote);
     if (typeTarget) {
       const field = findMatchingFormField(args.pageState, typeTarget);
-      const formValue = field ? inferFormFieldValue(field) : null;
+      const formValue = field ? inferFormFieldValue(field, args.pageState.url) : null;
 
       if (field && formValue) {
         const target = resolveFormFieldTarget(field);
@@ -1362,6 +1447,74 @@ export type PlannerResolution = {
   fallbackReason?: string;
 };
 
+function enforceOtpTriggerBeforeSubmit(args: {
+  pageState: PageState;
+  history: TaskHistoryEntry[];
+  decision: PlannerDecision;
+}): PlannerDecision {
+  // Only intercept click actions that look like a form submit
+  if (args.decision.action !== "click") {
+    return args.decision;
+  }
+
+  const targetLabel = normalizeKey(args.decision.target || args.decision.instructionQuote || "");
+  if (!isSubmitLikeInteractiveLabel(targetLabel)) {
+    return args.decision;
+  }
+
+  // Check if the email field is filled
+  const emailFieldFilled = args.pageState.formFields.some((field) => {
+    const key = normalizeKey([field.label, field.placeholder, field.name, field.id, field.autocomplete ?? ""].join(" "));
+    return /\bemail\b/.test(key) && field.value && field.value.trim().length > 0;
+  });
+  if (!emailFieldFilled) {
+    return args.decision;
+  }
+
+  // Check if there's a visible OTP trigger button
+  const otpTriggerControl = args.pageState.interactive.find((item) => {
+    if (item.disabled) {
+      return false;
+    }
+
+    const label = normalizeKey(getInteractiveLabel(item));
+    return /\b(?:send\s*(?:otp|code)|get\s*(?:otp|code)|verify\s*email|request\s*(?:otp|code))\b/.test(label);
+  });
+  if (!otpTriggerControl) {
+    return args.decision;
+  }
+
+  // Check if the OTP trigger was already clicked
+  const alreadyClicked = args.history.some(
+    (entry) =>
+      entry.decision.action === "click" &&
+      entry.result.success &&
+      normalizeKey(entry.decision.target || "").includes(normalizeKey(getInteractiveLabel(otpTriggerControl)))
+  );
+  if (alreadyClicked) {
+    return args.decision;
+  }
+
+  // Redirect to click the OTP trigger before submitting
+  const target = resolveInteractiveTarget(otpTriggerControl);
+  const stepReference = findInteractiveStepReference({
+    pageState: args.pageState,
+    item: otpTriggerControl
+  });
+
+  return {
+    thought: `The form has an unclicked OTP/verification trigger '${target}' that must be completed before submitting. Redirecting from '${args.decision.target}' to '${target}'.`,
+    stepNumber: stepReference.stepNumber,
+    instructionQuote: stepReference.instructionQuote,
+    action: "click",
+    target_id: otpTriggerControl.agentId,
+    target,
+    text: "",
+    expectation: `Click '${target}' to trigger email verification before submitting the form.`,
+    friction: "medium"
+  };
+}
+
 function finalizePlannerDecision(args: {
   task: TaskSuite["tasks"][number];
   pageState: PageState;
@@ -1376,13 +1529,17 @@ function finalizePlannerDecision(args: {
         taskGoal: args.task.goal,
         history: args.history,
         pageState: args.pageState,
-        decision: enforceOrderedTaskDirectives({
-          task: args.task,
+        decision: enforceOtpTriggerBeforeSubmit({
           pageState: args.pageState,
           history: args.history,
-          decision: enrichDecisionTarget({
+          decision: enforceOrderedTaskDirectives({
+            task: args.task,
             pageState: args.pageState,
-            decision: args.decision
+            history: args.history,
+            decision: enrichDecisionTarget({
+              pageState: args.pageState,
+              decision: args.decision
+            })
           })
         })
       })
@@ -1404,7 +1561,7 @@ export async function decideNextAction(args: {
   const orderedStepNotes = buildTaskDirectiveSummary(task.goal);
   const hasUnstructuredSteps = orderedSteps.some((directive) => directive.action === "unstructured");
   const orderedStepConfidence = orderedSteps.length === 0 ? "none" : hasUnstructuredSteps ? "low" : "high";
-  const accessProfile = getPreferredAccessIdentity();
+  const accessProfile = getPreferredAccessIdentity(args.pageState.url);
   const payload = PlannerInputSchema.parse({
     persona: args.suite.persona,
     task: {

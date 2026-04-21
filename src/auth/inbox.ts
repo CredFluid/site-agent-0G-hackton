@@ -171,6 +171,7 @@ export async function waitForVerificationEmail(args: {
   mailbox: MailboxConfig;
   checkpoint: InboxCheckpoint;
   siteHost: string;
+  recipientEmail?: string;
   timeoutMs?: number;
   pollIntervalMs?: number;
   otpLength?: number;
@@ -215,6 +216,16 @@ export async function waitForVerificationEmail(args: {
                 ""
             );
             const sourceText = normalizeText([parsed.text || "", typeof parsed.html === "string" ? parsed.html : ""].join("\n"));
+
+            if (args.recipientEmail) {
+              const toAddresses = (
+                message.envelope?.to?.map((entry) => entry.address?.toLowerCase()).filter(Boolean) ?? []
+              ) as string[];
+
+              if (!toAddresses.includes(args.recipientEmail.toLowerCase())) {
+                continue;
+              }
+            }
 
             if (!messageMatchesFilters({ subject, from, sourceText })) {
               continue;

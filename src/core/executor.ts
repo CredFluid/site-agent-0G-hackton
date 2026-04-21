@@ -468,6 +468,20 @@ async function fillFieldValue(args: {
   }
 
   const fittedValue = fitValueToField(args.field, args.value);
+
+  // Native date/time inputs require .fill() with ISO format — typeLikeHuman types
+  // individual characters which the browser's native picker interprets incorrectly
+  // (e.g. "1998-04-17" typed char-by-char becomes "12/09/80417").
+  const isNativeDateInput = ["date", "time", "datetime-local", "month", "week"].includes(args.field.inputType);
+  if (isNativeDateInput) {
+    const preparedLocator = await prepareLocatorForInteraction(args.locator);
+    await preparedLocator.fill(fittedValue);
+    return {
+      expectedValue: fittedValue,
+      mode: "fill"
+    };
+  }
+
   await typeLikeHuman(args.locator, fittedValue);
   return {
     expectedValue: fittedValue,

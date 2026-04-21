@@ -9,10 +9,12 @@ import {
   type LaunchOptions,
   type Page
 } from "playwright";
-import { isAuthBootstrapConfigured } from "../auth/profile.js";
+import { captureInboxCheckpoint, waitForVerificationEmail } from "../auth/inbox.js";
+import { getMailboxConfig, getPreferredAccessIdentity, isAuthBootstrapConfigured } from "../auth/profile.js";
 import { detectAuthWall, runAuthFlowInContext } from "../auth/runner.js";
 import { clampRunDurationMs, config } from "../config.js";
 import { runAccessibilityAudit } from "./audit.js";
+import { buildLooseAccessiblePattern, prepareLocatorForInteraction } from "./interaction.js";
 import { capturePageState } from "./pageState.js";
 import { decideNextAction } from "./planner.js";
 import { executeDecision, prepareClickDecision } from "./executor.js";
@@ -80,9 +82,31 @@ const STAGNATION_WINDOW = 5;
 const ACCOUNT_CREATION_TASK_PATTERN = /\b(?:sign ?up|signup|register|create(?:\s+your)?\s+(?:account|profile)|create\s+my\s+account|join)\b/i;
 const ACCOUNT_CREATION_SUBMIT_PATTERN = /\b(?:submit|register|sign ?up|create\b.*\baccount|join)\b/i;
 const ACCOUNT_CREATION_SUCCESS_PATTERN =
-  /\b(?:registered users?|add another registration|account created|account ready|welcome|dashboard|verify your email|check your email|profile active|view live market screen)\b/i;
+  /\b(?:registered users?|add another registration|account created|account ready|welcome|dashboard|profile active|view live market screen)\b/i;
 const ACCOUNT_CREATION_LOCAL_ONLY_PATTERN =
   /\b(?:browser fallback|browser storage only|using browser storage only|local server is unavailable|api is unavailable)\b/i;
+const ACCOUNT_CREATION_FORM_STILL_VISIBLE_PATTERN =
+  /\b(?:first\s*name|last\s*name|email\s*address|confirm\s*password|phone\s*number|date\s*of\s*birth)\b.*\b(?:create\s*(?:my\s*)?account|sign\s*up|register)\b/is;
+const ACCOUNT_CREATION_VERIFICATION_PENDING_PATTERN =
+  /\b(?:please\s+verify|verify\s+your\s+email|check\s+your\s+email|send\s+otp|enter\s+(?:the\s+)?(?:code|otp)|verification\s+code)\b/i;
+const OTP_TRIGGER_CLICK_PATTERN =
+  /\b(?:send\s*(?:otp|code)|get\s*(?:otp|code)|verify\s*email|request\s*(?:otp|code))\b/i;
+const OTP_FIELD_PATTERN =
+  /\b(?:otp|one[- ]?time|verification|passcode|security\s*code|auth\s*code|enter\s*code)\b/i;
+const OTP_VERIFY_SUBMIT_LABELS = [
+  "verify",
+  "confirm",
+  "continue",
+  "submit",
+  "finish",
+  "complete",
+  "activate",
+  "create my account",
+  "create account",
+  "register",
+  "sign up",
+  "signup"
+];
 
 type ServerlessChromiumModule = {
   args: string[];
@@ -170,6 +194,282 @@ function summarizeLocalPath(filePath: string): string {
 
 function taskAllowsAutoAuth(taskGoal: string): boolean {
   return !AUTO_AUTH_SKIP_TASK_PATTERNS.some((pattern) => pattern.test(taskGoal));
+}
+
+function normalizeVisibleText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+async function pageStillNeedsOtpVerification(page: Page): Promise<boolean> {
+  const bodyText = normalizeVisibleText(await page.locator("body").innerText().catch(() => ""));
+  if (ACCOUNT_CREATION_VERIFICATION_PENDING_PATTERN.test(bodyText)) {
+    return true;
+  }
+
+  const hasVisibleOtpField = await page
+    .evaluate((otpPattern) => {
+      const inputs = Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"));
+      return inputs.some((input) => {
+        const rect = input.getBoundingClientRect();
+        const style = window.getComputedStyle(input);
+        if (
+          rect.width <= 0 ||
+          rect.height <= 0 ||
+          style.visibility === "hidden" ||
+          style.display === "none" ||
+          input.disabled
+        ) {
+          return false;
+        }
+
+        const key = [
+          input.getAttribute("placeholder") || "",
+          input.getAttribute("name") || "",
+          input.id || "",
+          input.getAttribute("aria-label") || "",
+          input.getAttribute("autocomplete") || "",
+          input.type || ""
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return new RegExp(otpPattern, "i").test(key) || input.getAttribute("autocomplete") === "one-time-code";
+      });
+    }, OTP_FIELD_PATTERN.source)
+    .catch(() => false);
+
+  return hasVisibleOtpField;
+}
+
+async function clickFirstVisibleAction(page: Page, labels: string[]): Promise<string | null> {
+  for (const label of labels) {
+    const pattern = buildLooseAccessiblePattern(label);
+    if (!pattern) {
+      continue;
+    }
+
+    const locators = [
+      page.getByRole("button", { name: pattern }),
+      page.getByRole("link", { name: pattern }),
+      page.getByText(pattern)
+    ];
+
+    for (const locator of locators) {
+      const candidate = locator.first();
+      try {
+        if (!(await candidate.isVisible({ timeout: 500 }))) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+
+      const prepared = await prepareLocatorForInteraction(candidate).catch(() => candidate);
+      await prepared.click({ timeout: 5000 }).catch(async () => {
+        await prepared.click({ force: true, timeout: 5000 });
+      });
+      await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await page.waitForTimeout(config.actionDelayMs);
+      return label;
+    }
+  }
+
+  return null;
+}
+
+async function attemptOtpRetrieval(args: {
+  page: Page;
+  baseUrl: string;
+  rawEvents: unknown[];
+  taskName: string;
+  step: number;
+}): Promise<{ filled: boolean; otpCode?: string; error?: string }> {
+  const mailbox = getMailboxConfig();
+  if (!mailbox) {
+    return { filled: false, error: "IMAP mailbox is not configured (AUTH_IMAP_* settings missing)." };
+  }
+
+  const identity = getPreferredAccessIdentity(args.baseUrl);
+  const siteHost = new URL(args.baseUrl).hostname;
+
+  try {
+    const checkpoint = await captureInboxCheckpoint(mailbox);
+    args.rawEvents.push({
+      type: "otp_inbox_checkpoint",
+      time: new Date().toISOString(),
+      task: args.taskName,
+      step: args.step,
+      note: `Captured mailbox checkpoint at UID ${checkpoint.uidNext} to watch for verification email.`
+    });
+
+    const message = await waitForVerificationEmail({
+      mailbox,
+      checkpoint,
+      siteHost,
+      recipientEmail: identity.email,
+      timeoutMs: 60000,
+      pollIntervalMs: 3000
+    });
+
+    args.rawEvents.push({
+      type: "otp_email_received",
+      time: new Date().toISOString(),
+      task: args.taskName,
+      step: args.step,
+      note: `Received verification email '${message.subject}' with ${message.otpCode ? "OTP code" : "no OTP code"}.`,
+      hasOtpCode: Boolean(message.otpCode),
+      hasVerificationLink: Boolean(message.verificationLink)
+    });
+
+    if (!message.otpCode) {
+      return { filled: false, error: "Verification email arrived but no OTP code could be extracted." };
+    }
+
+    // Wait for OTP input fields to appear on the page (they may render after a short delay)
+    await args.page.waitForTimeout(1500);
+
+    // Detect OTP input fields — handles both split-digit (6 separate inputs) and single-field patterns
+    const otpFieldInfo = await args.page.evaluate((otpPattern) => {
+      const inputs = Array.from(document.querySelectorAll<HTMLInputElement>("input, textarea"));
+      const visibleInputs = inputs.filter((input) => {
+        const rect = input.getBoundingClientRect();
+        const style = window.getComputedStyle(input);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.visibility !== "hidden" &&
+          style.display !== "none" &&
+          !input.disabled
+        );
+      });
+
+      // Strategy 1: Detect split-digit OTP inputs (multiple single-char inputs with numeric inputMode)
+      const singleDigitInputs = visibleInputs.filter(
+        (input) =>
+          input.maxLength === 1 &&
+          (input.inputMode === "numeric" || input.type === "tel" || input.type === "number") &&
+          input.type !== "hidden"
+      );
+
+      if (singleDigitInputs.length >= 4 && singleDigitInputs.length <= 8) {
+        const agentIds = singleDigitInputs.map((input, index) => {
+          let id = input.getAttribute("data-site-agent-id");
+          if (!id) {
+            id = `temp-otp-${index}`;
+            input.setAttribute("data-site-agent-id", id);
+          }
+          return id;
+        });
+        return { type: "split-digit" as const, count: singleDigitInputs.length, agentIds };
+      }
+
+      // Strategy 2: Detect single OTP input field by semantic attributes
+      for (const input of visibleInputs) {
+        const fieldKey = [
+          input.getAttribute("placeholder") || "",
+          input.getAttribute("name") || "",
+          input.id || "",
+          input.getAttribute("aria-label") || "",
+          input.getAttribute("autocomplete") || "",
+          input.type || ""
+        ].join(" ").toLowerCase();
+
+        if (
+          new RegExp(otpPattern, "i").test(fieldKey) ||
+          input.getAttribute("autocomplete") === "one-time-code" ||
+          (input.maxLength >= 4 && input.maxLength <= 8 && input.inputMode === "numeric" && !input.value)
+        ) {
+          let agentId = input.getAttribute("data-site-agent-id");
+          if (!agentId) {
+            agentId = "temp-otp-single";
+            input.setAttribute("data-site-agent-id", agentId);
+          }
+          return { type: "single" as const, agentId, label: fieldKey.trim().slice(0, 60) };
+        }
+      }
+
+      return null;
+    }, OTP_FIELD_PATTERN.source);
+
+    if (!otpFieldInfo) {
+      return { filled: false, otpCode: message.otpCode, error: "OTP code was extracted from email but no OTP input field was found on the page." };
+    }
+
+    // Fill the OTP field(s)
+    if (otpFieldInfo.type === "split-digit") {
+      // Fill each digit input individually using keyboard input to trigger React onChange
+      const digits = message.otpCode.split("").slice(0, otpFieldInfo.count);
+
+      for (let i = 0; i < digits.length; i++) {
+        const agentId = otpFieldInfo.agentIds[i];
+        if (!agentId) {
+          continue;
+        }
+
+        const digitLocator = args.page.locator(`[data-site-agent-id="${agentId}"]`).first();
+        await digitLocator.click();
+        await args.page.keyboard.press(digits[i]!);
+        await args.page.waitForTimeout(100);
+      }
+
+      // Wait for auto-verification to complete (triggered when all digits are filled)
+      await args.page.waitForTimeout(2000);
+
+      args.rawEvents.push({
+        type: "otp_field_filled",
+        time: new Date().toISOString(),
+        task: args.taskName,
+        step: args.step,
+        note: `Filled ${digits.length} split-digit OTP inputs with code from verification email.`,
+        fieldType: "split-digit",
+        digitCount: digits.length
+      });
+    } else {
+      // Single OTP input field
+      const locator = otpFieldInfo.agentId
+        ? args.page.locator(`[data-site-agent-id="${otpFieldInfo.agentId}"]`).first()
+        : args.page.locator("input[autocomplete='one-time-code']").first();
+
+      await locator.fill(message.otpCode);
+      await args.page.waitForTimeout(500);
+
+      args.rawEvents.push({
+        type: "otp_field_filled",
+        time: new Date().toISOString(),
+        task: args.taskName,
+        step: args.step,
+        note: `Filled OTP field with code from verification email.`,
+        fieldType: "single",
+        fieldLabel: otpFieldInfo.label
+      });
+    }
+
+    if (await pageStillNeedsOtpVerification(args.page)) {
+      const clickedLabel = await clickFirstVisibleAction(args.page, OTP_VERIFY_SUBMIT_LABELS);
+      if (clickedLabel) {
+        args.rawEvents.push({
+          type: "otp_verify_submit",
+          time: new Date().toISOString(),
+          task: args.taskName,
+          step: args.step,
+          note: `Clicked '${clickedLabel}' after filling the OTP to finalize verification.`
+        });
+      }
+    }
+
+    return { filled: true, otpCode: message.otpCode };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    args.rawEvents.push({
+      type: "otp_retrieval_error",
+      time: new Date().toISOString(),
+      task: args.taskName,
+      step: args.step,
+      note: `OTP retrieval failed: ${errorMessage}`
+    });
+
+    return { filled: false, error: errorMessage };
+  }
 }
 
 function buildNavigationBlockedSiteBrief(args: { baseUrl: string; note: string }): SiteBrief {
@@ -378,10 +678,18 @@ function inferTaskStatus(
     taskLooksLikeAccountCreation(task.goal) &&
     Boolean(successfulSubmitEntry) &&
     ACCOUNT_CREATION_LOCAL_ONLY_PATTERN.test(accountCreationEvidenceBlob);
+  const postSubmitSnippet = successfulSubmitEntry?.result.visibleTextSnippet ?? "";
+  const accountCreationFormStillVisible = ACCOUNT_CREATION_FORM_STILL_VISIBLE_PATTERN.test(postSubmitSnippet);
+  const accountCreationVerificationPending =
+    taskLooksLikeAccountCreation(task.goal) &&
+    Boolean(successfulSubmitEntry) &&
+    ACCOUNT_CREATION_VERIFICATION_PENDING_PATTERN.test(postSubmitSnippet) &&
+    accountCreationFormStillVisible;
   const accountCreationSucceeded =
     taskLooksLikeAccountCreation(task.goal) &&
     Boolean(successfulSubmitEntry) &&
-    ACCOUNT_CREATION_SUCCESS_PATTERN.test(accountCreationEvidenceBlob);
+    ACCOUNT_CREATION_SUCCESS_PATTERN.test(accountCreationEvidenceBlob) &&
+    !accountCreationFormStillVisible;
 
   if (isGameplayTask(task)) {
     const gameplay = summarizeGameplayHistory(history);
@@ -566,6 +874,14 @@ function inferTaskStatus(
       };
     }
 
+    if (accountCreationVerificationPending) {
+      return {
+        status: "partial_success",
+        reason:
+          "The signup form was filled and submitted, but the page is still requesting email or OTP verification before the account can be created."
+      };
+    }
+
     if (failedClicks.length > 0) {
       return { status: "failed", reason: failedClicks[0]!.result.note };
     }
@@ -599,6 +915,14 @@ function inferTaskStatus(
     return {
       status: "success",
       reason: "The signup flow submitted successfully and the visible page switched into a post-registration state."
+    };
+  }
+
+  if (accountCreationVerificationPending) {
+    return {
+      status: "partial_success",
+      reason:
+        "The signup form was filled and submitted, but the page is still requesting email or OTP verification before the account can be created."
     };
   }
 
@@ -957,7 +1281,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
         warn(`Site brief fallback for '${options.baseUrl}': ${siteBriefResolution.fallbackReason}`);
       }
     }
-    const authBootstrapConfigured = isAuthBootstrapConfigured();
+    const authBootstrapConfigured = isAuthBootstrapConfigured(options.baseUrl);
     let autoAuthAttempted = false;
 
     for (const [index, task] of options.suite.tasks.entries()) {
@@ -1214,6 +1538,35 @@ export async function runTaskSuite(options: RunOptions): Promise<{
 
         if (result.stop || decision.action === "stop") {
           break;
+        }
+
+        // After a successful OTP-trigger click, attempt to retrieve and fill the OTP code
+        if (
+          decision.action === "click" &&
+          result.success &&
+          OTP_TRIGGER_CLICK_PATTERN.test(decision.target || "")
+        ) {
+          rawEvents.push({
+            type: "otp_trigger_detected",
+            time: new Date().toISOString(),
+            task: task.name,
+            step,
+            note: `Detected OTP trigger click on '${decision.target}'. Will attempt to retrieve OTP from email.`
+          });
+
+          const otpResult = await attemptOtpRetrieval({
+            page,
+            baseUrl: options.baseUrl,
+            rawEvents,
+            taskName: task.name,
+            step
+          });
+
+          if (otpResult.filled) {
+            taskNotes.push(`OTP code was retrieved from email and filled into the verification field.`);
+          } else if (otpResult.error) {
+            taskNotes.push(`OTP retrieval: ${otpResult.error}`);
+          }
         }
 
         if (shouldPauseAfterStep({

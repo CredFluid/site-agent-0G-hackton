@@ -77,7 +77,8 @@ Host binding used by the local app server.
 
 ## Auth bootstrap variables
 
-These are only needed when you use `--auth-flow` or `--auth-only`.
+These are needed when you bootstrap a new auth identity with `--auth-flow` or `--auth-only`.
+After a successful auth run, the runner also caches the working credentials in `.auth/credentials.json` keyed by target origin, so later runs against the same site can reuse them automatically.
 
 ### `AUTH_TEST_EMAIL`
 Required for auth bootstrap.
@@ -90,6 +91,11 @@ If the site says the account already exists, the runner now retries with fresh p
 Required for auth bootstrap.
 
 The password the runner uses for both signup and login.
+
+### `AUTH_TEST_USERNAME`
+Optional.
+
+Use this when the site expects a username field that is different from the email address. If omitted, the runner derives a fallback username from the configured email address.
 
 ### `AUTH_TEST_FIRST_NAME` through `AUTH_TEST_COMPANY`
 Defaults are provided in `.env.example`.
