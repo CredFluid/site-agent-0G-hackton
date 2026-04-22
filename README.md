@@ -280,6 +280,45 @@ PLAYWRIGHT_STORAGE_STATE_PATH=.auth/session.json
 
 ---
 
+## Web3 Wallet Integration
+
+The agent has built-in support for interacting with Web3 dApps. It uses a dual-mode architecture:
+
+1. **Programmatic Provider (Default):** Injects a secure, headless-compatible `window.ethereum` provider. Transaction signing requests are intercepted and sent to a local HTTP relay running securely inside the Node.js process. The private key never enters the browser.
+2. **MetaMask Extension Mode (Optional):** Runs a full headed browser with the MetaMask extension loaded, and automatically clicks "Connect", "Confirm", or "Sign" in MetaMask popups.
+
+### Quick Setup
+
+Configure your wallet in `.env`:
+
+```bash
+# Required
+WALLET_PRIVATE_KEY=your_private_key_here
+WALLET_RPC_URL=https://eth-sepolia.g.alchemy.com/v2/...
+WALLET_CHAIN_ID=11155111
+
+# Optional: Mnemonic instead of private key
+# WALLET_MNEMONIC="word1 word2 ..."
+```
+
+Once configured, the agent will automatically inject the wallet into every page it visits. The LLM planner is also aware of its wallet address and can interact with "Connect Wallet" flows.
+
+### Using MetaMask Extension Mode
+
+If you specifically need to test how a dApp interacts with the MetaMask UI, you can run the agent with the extension loaded. This requires extracting the MetaMask extension folder (not a `.crx` file).
+
+**How to get the Extension Path (Mac):**
+1. Ensure MetaMask is installed in your normal Google Chrome browser.
+2. The extracted path is typically located at:
+   `/Users/<YourUsername>/Library/Application Support/Google/Chrome/Default/Extensions/nkbihfbeogaeaoehlefnkodbefgpgknn/<version_number>`
+3. Set the environment variable in `.env`:
+   ```bash
+   WALLET_METAMASK_EXTENSION_PATH=/Users/YourUsername/Library/.../11.14.2_0
+   ```
+*Note: Using this mode forces the agent to run in headed (visible) mode.*
+
+---
+
 ## Configuration
 
 All settings are read from environment variables (`.env` file).

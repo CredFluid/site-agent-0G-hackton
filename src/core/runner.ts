@@ -13,6 +13,9 @@ import { captureInboxCheckpoint, waitForVerificationEmail } from "../auth/inbox.
 import { getMailboxConfig, getPreferredAccessIdentity, isAuthBootstrapConfigured } from "../auth/profile.js";
 import { detectAuthWall, runAuthFlowInContext } from "../auth/runner.js";
 import { clampRunDurationMs, config } from "../config.js";
+import { isWalletConfigured, getWalletConfig, getMetaMaskExtensionPath } from "../wallet/wallet.js";
+import { buildWeb3InjectionScript } from "../wallet/provider.js";
+import { startSigningRelay, type SigningRelay } from "../wallet/relay.js";
 import { runAccessibilityAudit } from "./audit.js";
 import { buildLooseAccessiblePattern, prepareLocatorForInteraction } from "./interaction.js";
 import { capturePageState } from "./pageState.js";
@@ -140,6 +143,22 @@ function shouldUseServerlessChromium(): boolean {
 
 async function resolveLaunchOptions(options: { headed: boolean | undefined }): Promise<LaunchOptions> {
   const explicitExecutablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH?.trim();
+  const metamaskPath = getMetaMaskExtensionPath();
+
+  // When MetaMask extension mode is requested, force headed + extension args
+  if (metamaskPath) {
+    debug("launch options: MetaMask extension mode (headed)", { metamaskPath });
+    const baseArgs = [
+      `--disable-extensions-except=${metamaskPath}`,
+      `--load-extension=${metamaskPath}`
+    ];
+    return {
+      headless: false,
+      args: baseArgs,
+      ...(explicitExecutablePath ? { executablePath: explicitExecutablePath } : {})
+    };
+  }
+
   if (explicitExecutablePath) {
     debug("launch options: using explicit executable path");
     return {
@@ -1096,6 +1115,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
   let browser: Browser | null = null;
   let context: BrowserContext | null = null;
   let page: Page | null = null;
+  let signingRelay: SigningRelay | null = null;
   let browserTimezone = config.deviceTimezone;
   let accessibility: Awaited<ReturnType<typeof runAccessibilityAudit>> = {
     violations: [],
@@ -1192,6 +1212,81 @@ export async function runTaskSuite(options: RunOptions): Promise<{
     browser = await chromium.launch(await resolveLaunchOptions({ headed: options.headed }));
     context = await browser.newContext(contextOptions);
     await installPlaywrightPageCompat(context);
+
+    // --- Web3 wallet injection ---
+    if (isWalletConfigured()) {
+      try {
+        const walletConfig = await getWalletConfig();
+        if (walletConfig) {
+          signingRelay = await startSigningRelay();
+          const injectionScript = buildWeb3InjectionScript({
+            walletConfig,
+            relayPort: signingRelay.port
+          });
+          await context.addInitScript(injectionScript);
+
+          rawEvents.push({
+            type: "wallet_injected",
+            time: new Date().toISOString(),
+            address: walletConfig.address,
+            chainId: walletConfig.chainId,
+            relayPort: signingRelay.port,
+            mode: walletConfig.metamaskExtensionPath ? "metamask_extension" : "programmatic",
+            note: `Web3 wallet injected — address ${walletConfig.address} on chain ${walletConfig.chainId} (relay on port ${signingRelay.port}).`
+          });
+
+          // MetaMask popup auto-approve handler
+          if (walletConfig.metamaskExtensionPath) {
+            context.on("page", async (popupPage: Page) => {
+              try {
+                const popupUrl = popupPage.url();
+                if (!popupUrl.includes("chrome-extension://")) {
+                  return;
+                }
+
+                debug("MetaMask popup detected", { url: popupUrl });
+                await popupPage.waitForLoadState("domcontentloaded").catch(() => undefined);
+                await popupPage.waitForTimeout(1500);
+
+                // Try common MetaMask approval buttons
+                const approvalLabels = ["Connect", "Confirm", "Sign", "Approve", "Next", "Got it"];
+                for (const label of approvalLabels) {
+                  const btn = popupPage.getByRole("button", { name: label }).first();
+                  try {
+                    if (await btn.isVisible({ timeout: 800 })) {
+                      await btn.click({ timeout: 3000 });
+                      await popupPage.waitForTimeout(600);
+                      rawEvents.push({
+                        type: "metamask_popup_action",
+                        time: new Date().toISOString(),
+                        label,
+                        note: `Auto-clicked '${label}' in MetaMask popup.`
+                      });
+                    }
+                  } catch {
+                    // button not found or click failed — try next
+                  }
+                }
+              } catch (error) {
+                rawEvents.push({
+                  type: "metamask_popup_error",
+                  time: new Date().toISOString(),
+                  note: `MetaMask popup handler error: ${cleanErrorMessage(error)}`
+                });
+              }
+            });
+          }
+        }
+      } catch (walletError) {
+        rawEvents.push({
+          type: "wallet_injection_error",
+          time: new Date().toISOString(),
+          note: `Failed to inject Web3 wallet: ${cleanErrorMessage(walletError)}`
+        });
+        warn(`Web3 wallet injection failed: ${cleanErrorMessage(walletError)}`);
+      }
+    }
+
     page = await context.newPage();
     page.setDefaultNavigationTimeout(config.navigationTimeoutMs);
     page.setDefaultTimeout(config.navigationTimeoutMs);
@@ -1670,6 +1765,11 @@ export async function runTaskSuite(options: RunOptions): Promise<{
 
     await context?.close().catch(() => undefined);
     await browser?.close().catch(() => undefined);
+
+    // Clean up the signing relay if it was started
+    if (signingRelay) {
+      await signingRelay.close().catch(() => undefined);
+    }
   }
 
   return {

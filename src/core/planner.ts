@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getPreferredAccessIdentity } from "../auth/profile.js";
 import { generateStructured, type LlmRuntimeOptions } from "../llm/client.js";
+import { isWalletConfigured, getWalletAddress } from "../wallet/wallet.js";
 import { BROWSER_AGENT_PROMPT } from "../prompts/browserAgent.js";
 import {
   scoreFormFieldTargetMatch,
@@ -105,7 +106,8 @@ const PlannerInputSchema = z.object({
     state: z.string(),
     postalCode: z.string(),
     country: z.string(),
-    company: z.string()
+    company: z.string(),
+    walletAddress: z.string().default("")
   }),
   pageState: z.object({
     title: z.string(),
@@ -1562,6 +1564,7 @@ export async function decideNextAction(args: {
   const hasUnstructuredSteps = orderedSteps.some((directive) => directive.action === "unstructured");
   const orderedStepConfidence = orderedSteps.length === 0 ? "none" : hasUnstructuredSteps ? "low" : "high";
   const accessProfile = getPreferredAccessIdentity(args.pageState.url);
+  const walletAddress = isWalletConfigured() ? await getWalletAddress().catch(() => "") : "";
   const payload = PlannerInputSchema.parse({
     persona: args.suite.persona,
     task: {
@@ -1576,7 +1579,10 @@ export async function decideNextAction(args: {
       ordered_step_notes: orderedStepNotes
     },
     siteBrief: args.siteBrief,
-    accessProfile,
+    accessProfile: {
+      ...accessProfile,
+      walletAddress
+    },
     pageState: args.pageState,
     ...(args.remainingSeconds !== undefined ? { remainingSeconds: args.remainingSeconds } : {}),
     previous_actions: args.history.slice(-20).map((item) => ({
