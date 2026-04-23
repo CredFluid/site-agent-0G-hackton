@@ -60,6 +60,46 @@ async function generateWithOpenAI<T>(options: {
   return options.schema.parse(response.output_parsed);
 }
 
+const ollamaReachableCache = new Map<string, true>();
+
+async function ensureOllamaReachable(baseUrl: string): Promise<void> {
+  if (ollamaReachableCache.has(baseUrl)) {
+    return;
+  }
+
+  try {
+    const response = await fetch(new URL("/api/tags", baseUrl), {
+      method: "GET",
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Ollama server at ${baseUrl} returned ${response.status} ${response.statusText}. ` +
+        `Make sure Ollama is running — start it with: ollama serve`
+      );
+    }
+
+    ollamaReachableCache.set(baseUrl, true);
+  } catch (error) {
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      throw new Error(
+        `Ollama server at ${baseUrl} did not respond within 5 seconds. ` +
+        `Make sure Ollama is running — start it with: ollama serve`
+      );
+    }
+
+    if (error instanceof TypeError || (error instanceof Error && /fetch failed|ECONNREFUSED|ENOTFOUND/.test(error.message))) {
+      throw new Error(
+        `Cannot connect to Ollama at ${baseUrl}. ` +
+        `Make sure Ollama is installed and running — start it with: ollama serve`
+      );
+    }
+
+    throw error;
+  }
+}
+
 async function requestOllama<T>(options: {
   baseUrl: string;
   model: string;
@@ -68,6 +108,8 @@ async function requestOllama<T>(options: {
   schema: ZodType<T>;
   timeoutMs?: number;
 }): Promise<T> {
+  await ensureOllamaReachable(options.baseUrl);
+
   const controller = new AbortController();
   const timeoutId =
     options.timeoutMs !== undefined

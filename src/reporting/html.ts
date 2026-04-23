@@ -25,6 +25,7 @@ type HtmlReportArgs = {
   startedAt: string | undefined;
   mobile: boolean | undefined;
   timeZone: string | undefined;
+  clickReplayArtifact?: string | null | undefined;
 };
 
 type SessionLogItem = {
@@ -718,6 +719,20 @@ export function renderHtmlReport(args: HtmlReportArgs): string {
           <div class="score-label">Accepted-task execution plus supporting diagnostics.</div>
         </div>
       </section>
+
+      ${
+        args.clickReplayArtifact
+          ? `
+            <section class="section">
+              <h2>Click Replay</h2>
+              <div class="summary-card" style="padding: 0; overflow: hidden; background: #000; display: flex; justify-content: center; align-items: center; min-height: 400px; border: 1px solid var(--border2);">
+                <img src="${args.clickReplayArtifact}" alt="Click Replay" style="max-width: 100%; max-height: 720px; display: block;" />
+              </div>
+              <p class="meta-label" style="margin-top: 0.8rem; text-align: center;">Animated replay of actions captured during this run.</p>
+            </section>
+          `
+          : ""
+      }
 
       <section class="section">
         <h2>1. Task Summary</h2>

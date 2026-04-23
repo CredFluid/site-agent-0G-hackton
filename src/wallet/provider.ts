@@ -36,6 +36,7 @@ export function buildWeb3InjectionScript(args: {
   var RPC_URL = ${JSON.stringify(rpcUrl)};
   var RELAY_ORIGIN = ${JSON.stringify(relayOrigin)};
   var connected = true;
+  var upstreamEthereum = window.ethereum && !window.ethereum.__siteAgentInjected ? window.ethereum : null;
 
   /* ----- Event emitter ----- */
   var listeners = {};
@@ -86,42 +87,112 @@ export function buildWeb3InjectionScript(args: {
     });
   }
 
+  function maybeCaptureUpstreamEthereum(candidate) {
+    if (!candidate || candidate === provider || candidate.__siteAgentInjected) {
+      return;
+    }
+
+    if (
+      !upstreamEthereum ||
+      candidate.isMetaMask ||
+      (candidate._metamask && typeof candidate._metamask.isUnlocked === "function")
+    ) {
+      upstreamEthereum = candidate;
+    }
+  }
+
+  function getUpstreamEthereum() {
+    if (!upstreamEthereum && window.ethereum && window.ethereum !== provider && !window.ethereum.__siteAgentInjected) {
+      maybeCaptureUpstreamEthereum(window.ethereum);
+    }
+
+    if (!upstreamEthereum && window.ethereum && Array.isArray(window.ethereum.providers)) {
+      var announcedMetaMaskProvider = window.ethereum.providers.find(function(candidate) {
+        return candidate && candidate !== provider && (candidate.isMetaMask || candidate._metamask);
+      });
+      maybeCaptureUpstreamEthereum(announcedMetaMaskProvider);
+    }
+
+    return upstreamEthereum && upstreamEthereum !== provider ? upstreamEthereum : null;
+  }
+
   /* ----- EIP-1193 request handler ----- */
   function request(args) {
     var method = args.method;
     var params = args.params || [];
+    var originalEthereum = getUpstreamEthereum();
 
     switch (method) {
       case "eth_requestAccounts":
       case "eth_accounts":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args);
+        }
         return Promise.resolve([AGENT_ADDRESS]);
 
       case "eth_chainId":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args).catch(function() { return CHAIN_ID_HEX; });
+        }
         return Promise.resolve(CHAIN_ID_HEX);
 
       case "net_version":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args).catch(function() { return String(CHAIN_ID_DEC); });
+        }
         return Promise.resolve(String(CHAIN_ID_DEC));
 
       case "wallet_switchEthereumChain":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args);
+        }
         /* Accept any chain switch silently — the relay always uses the configured chain */
         emit("chainChanged", CHAIN_ID_HEX);
         return Promise.resolve(null);
 
+      case "wallet_addEthereumChain":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args);
+        }
+        emit("chainChanged", CHAIN_ID_HEX);
+        return Promise.resolve(null);
+
       case "wallet_requestPermissions":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args);
+        }
         return Promise.resolve([{ parentCapability: "eth_accounts" }]);
 
+      case "wallet_watchAsset":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args);
+        }
+        return Promise.resolve(true);
+
       case "eth_sendTransaction":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args);
+        }
         return relayCall("/send-transaction", { tx: params[0] });
 
       case "personal_sign":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args);
+        }
         return relayCall("/sign-message", { message: params[0], address: params[1] });
 
       case "eth_sign":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args);
+        }
         return relayCall("/sign-message", { message: params[1], address: params[0] });
 
       case "eth_signTypedData":
       case "eth_signTypedData_v3":
       case "eth_signTypedData_v4":
+        if (originalEthereum && originalEthereum.request) {
+           return originalEthereum.request(args);
+        }
         var typedDataParam = typeof params[1] === "string" ? JSON.parse(params[1]) : params[1];
         return relayCall("/sign-typed-data", { data: typedDataParam });
 
@@ -174,10 +245,24 @@ export function buildWeb3InjectionScript(args: {
   var provider = {
     isMetaMask: true,
     __siteAgentInjected: true,
-    chainId: CHAIN_ID_HEX,
-    networkVersion: String(CHAIN_ID_DEC),
-    selectedAddress: AGENT_ADDRESS,
-    isConnected: function() { return connected; },
+    get chainId() {
+      var originalEthereum = getUpstreamEthereum();
+      return originalEthereum && originalEthereum.chainId ? originalEthereum.chainId : CHAIN_ID_HEX;
+    },
+    get networkVersion() {
+      var originalEthereum = getUpstreamEthereum();
+      return originalEthereum && originalEthereum.networkVersion ? originalEthereum.networkVersion : String(CHAIN_ID_DEC);
+    },
+    get selectedAddress() {
+      var originalEthereum = getUpstreamEthereum();
+      return originalEthereum && originalEthereum.selectedAddress ? originalEthereum.selectedAddress : AGENT_ADDRESS;
+    },
+    isConnected: function() {
+      var originalEthereum = getUpstreamEthereum();
+      return originalEthereum && typeof originalEthereum.isConnected === "function"
+        ? originalEthereum.isConnected()
+        : connected;
+    },
     request: request,
     send: send,
     sendAsync: sendAsync,
@@ -190,9 +275,33 @@ export function buildWeb3InjectionScript(args: {
     /* Some dApps access these */
     enable: function() { return request({ method: "eth_requestAccounts" }); },
     _metamask: {
-      isUnlocked: function() { return Promise.resolve(true); }
+      isUnlocked: function() {
+        var originalEthereum = getUpstreamEthereum();
+        if (originalEthereum && originalEthereum._metamask && typeof originalEthereum._metamask.isUnlocked === "function") {
+          return originalEthereum._metamask.isUnlocked();
+        }
+        return Promise.resolve(true);
+      }
     }
   };
+
+  try {
+    window.addEventListener("eip6963:announceProvider", function(event) {
+      var detail = event && event.detail ? event.detail : null;
+      if (!detail || detail.provider === provider) {
+        return;
+      }
+
+      var info = detail.info || {};
+      if (info.rdns === "com.siteagent.wallet") {
+        return;
+      }
+
+      if (info.rdns === "io.metamask" || /metamask/i.test(info.name || "") || detail.provider.isMetaMask) {
+        maybeCaptureUpstreamEthereum(detail.provider);
+      }
+    });
+  } catch(e) { /* Provider discovery listener is optional */ }
 
   /* Announce the provider using EIP-6963 for modern dApps */
   try {
@@ -225,9 +334,10 @@ export function buildWeb3InjectionScript(args: {
 
   /* Install as window.ethereum */
   Object.defineProperty(window, "ethereum", {
-    value: provider,
-    writable: false,
-    configurable: true
+    configurable: true,
+    enumerable: true,
+    get: function() { return provider; },
+    set: function(candidate) { maybeCaptureUpstreamEthereum(candidate); }
   });
 
   /* Fire initial connect event on next tick */

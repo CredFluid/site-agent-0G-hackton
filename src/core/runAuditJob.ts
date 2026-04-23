@@ -171,7 +171,8 @@ export async function runAuditJob(options: {
         runId: path.basename(runDir),
         startedAt,
         mobile: Boolean(options.mobile),
-        timeZone: execution.browserTimezone || execution.deviceTimezone
+        timeZone: execution.browserTimezone || execution.deviceTimezone,
+        clickReplayArtifact
       })
     );
     writeText(

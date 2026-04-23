@@ -8,10 +8,11 @@ export type TaskDirective =
   | { action: "scroll"; raw: string; target: "" }
   | { action: "wait"; raw: string; target: "" }
   | { action: "back"; raw: string; target: "" }
+  | { action: "stop"; raw: string; target: "" }
   | { action: "unstructured"; raw: string; target: string };
 
 const ACTION_WORD_PATTERN =
-  "(?:click|tap|press|open|select|choose|fill(?:\\s+(?:out|up|in))?|enter|type|input|provide|submit|create|register|sign\\s*up|signup|join|scroll|swipe|wait|pause|hold|go back|back)";
+  "(?:click|tap|press|open|select|choose|fill(?:\\s+(?:out|up|in))?|enter|type|input|provide|submit|create|register|sign\\s*up|signup|join|scroll|swipe|wait|pause|hold|go back|back|stop|halt)";
 
 function cleanDirectiveText(value: string): string {
   return normalizeTaskText(value.replace(/^["'`]+|["'`]+$/g, "").replace(/[.?!,]+$/g, ""));
@@ -78,27 +79,50 @@ function isGenericVisibleFormInstruction(remainder: string): boolean {
   );
 }
 
+function isCompleteVisibleFormInstruction(segment: string): boolean {
+  const normalized = cleanDirectiveText(segment);
+  if (!/^complete\b/i.test(normalized)) {
+    return false;
+  }
+
+  const remainder = normalized.replace(/^complete\b\s*/i, "");
+  return (
+    isGenericVisibleFormInstruction(remainder) ||
+    /^(?:the\s+)?(?:(?:sign\s*up|signup|registration|account(?:\s+creation)?)\s+)?form(?:\s+out)?$/i.test(remainder)
+  );
+}
+
 export function parseTaskDirectives(taskText: string): TaskDirective[] {
   const directives: TaskDirective[] = [];
 
   for (const segment of splitDirectiveSegments(taskText)) {
-    const match = segment.match(
-      /^(click|tap|press|open|select|choose|fill(?:\s+(?:out|up|in))?|enter|type|input|provide|submit|create|register|sign\s*up|signup|join|scroll|swipe|wait|pause|hold|go back|back)\b\s*(.*)$/i
-    );
-
-    if (!match) {
-      const fallbackTarget = cleanDirectiveText(segment);
-      if (fallbackTarget) {
-        directives.push({
-          action: "unstructured",
-          raw: fallbackTarget,
-          target: fallbackTarget
-        });
-      }
+    const raw = cleanDirectiveText(segment);
+    if (!raw) {
       continue;
     }
 
-    const raw = cleanDirectiveText(segment);
+    if (isCompleteVisibleFormInstruction(raw)) {
+      directives.push({
+        action: "fill_visible_form",
+        raw,
+        target: ""
+      });
+      continue;
+    }
+
+    const match = segment.match(
+      /^(click|tap|press|open|select|choose|fill(?:\s+(?:out|up|in))?|enter|type|input|provide|submit|create|register|sign\s*up|signup|join|scroll|swipe|wait|pause|hold|go back|back|stop|halt)\b\s*(.*)$/i
+    );
+
+    if (!match) {
+      directives.push({
+        action: "unstructured",
+        raw,
+        target: raw
+      });
+      continue;
+    }
+
     const verb = (match[1] ?? "").toLowerCase();
     const remainder = match[2] ?? "";
     if (!verb) {
@@ -174,6 +198,15 @@ export function parseTaskDirectives(taskText: string): TaskDirective[] {
         raw,
         target: ""
       });
+      continue;
+    }
+
+    if (verb === "stop" || verb === "halt") {
+      directives.push({
+        action: "stop",
+        raw,
+        target: ""
+      });
     }
   }
 
@@ -196,6 +229,8 @@ export function describeTaskDirective(directive: TaskDirective): string {
       return "Wait briefly before taking any later action.";
     case "back":
       return "Go back once before taking any later action.";
+    case "stop":
+      return "Stop execution immediately and perform no further actions.";
     case "unstructured":
       return `Follow the user's instruction: '${directive.target}'.`;
     default:

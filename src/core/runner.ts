@@ -7,13 +7,19 @@ import {
   type BrowserContext,
   type BrowserContextOptions,
   type LaunchOptions,
+  type Locator,
   type Page
 } from "playwright";
 import { captureInboxCheckpoint, waitForVerificationEmail } from "../auth/inbox.js";
 import { getMailboxConfig, getPreferredAccessIdentity, isAuthBootstrapConfigured } from "../auth/profile.js";
 import { detectAuthWall, runAuthFlowInContext } from "../auth/runner.js";
 import { clampRunDurationMs, config } from "../config.js";
-import { isWalletConfigured, getWalletConfig, getMetaMaskExtensionPath } from "../wallet/wallet.js";
+import {
+  isWalletConfigured,
+  getWalletConfig,
+  getMetaMaskExtensionPath,
+  getMetaMaskUserDataDir
+} from "../wallet/wallet.js";
 import { buildWeb3InjectionScript } from "../wallet/provider.js";
 import { startSigningRelay, type SigningRelay } from "../wallet/relay.js";
 import { runAccessibilityAudit } from "./audit.js";
@@ -96,6 +102,8 @@ const OTP_TRIGGER_CLICK_PATTERN =
   /\b(?:send\s*(?:otp|code)|get\s*(?:otp|code)|verify\s*email|request\s*(?:otp|code))\b/i;
 const OTP_FIELD_PATTERN =
   /\b(?:otp|one[- ]?time|verification|passcode|security\s*code|auth\s*code|enter\s*code)\b/i;
+const WALLET_PENDING_PATTERN =
+  /\b(?:requesting\s+account|check\s+(?:your\s+)?wallet|confirm\s+(?:in|with)\s+metamask|confirm\s+in\s+your\s+wallet|open\s+metamask|awaiting\s+wallet|signature\s+request|approval\s+pending|waiting\s+for\s+wallet)\b/i;
 const OTP_VERIFY_SUBMIT_LABELS = [
   "verify",
   "confirm",
@@ -217,6 +225,500 @@ function taskAllowsAutoAuth(taskGoal: string): boolean {
 
 function normalizeVisibleText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+type ActiveTaskRef = {
+  name: string;
+  index: number;
+  history: TaskHistoryEntry[];
+  step: number;
+};
+
+type MetaMaskPopupKind = "connect" | "signature" | "transaction" | "network" | "approval" | "generic";
+type MetaMaskActionKey =
+  | "next"
+  | "connect"
+  | "approve"
+  | "confirm"
+  | "sign"
+  | "switchNetwork"
+  | "addNetwork"
+  | "gotIt";
+
+type MetaMaskPopupState = {
+  url: string;
+  title: string;
+  bodyText: string;
+  kind: MetaMaskPopupKind;
+  fingerprint: string;
+};
+
+type MetaMaskRuntimeState = {
+  activePopupCount: number;
+  lastDetectedAt: number;
+  lastActionAt: number;
+  lastClosedAt: number;
+};
+
+type MetaMaskActionDefinition = {
+  key: MetaMaskActionKey;
+  label: string;
+  selectors: string[];
+  buttonNames: RegExp[];
+};
+
+const METAMASK_EXTENSION_URL_PATTERN = "chrome-extension://";
+const METAMASK_MAX_ATTEMPTS = 60;
+const METAMASK_WAIT_MS = 1000;
+const METAMASK_REPEAT_CLICK_COOLDOWN_MS = 2500;
+const METAMASK_ACTIONS: Record<MetaMaskActionKey, MetaMaskActionDefinition> = {
+  next: {
+    key: "next",
+    label: "Next",
+    selectors: ['[data-testid="page-container-footer-next"]', 'button[data-testid*="next"]'],
+    buttonNames: [/^next$/i, /^continue$/i, /^review$/i]
+  },
+  connect: {
+    key: "connect",
+    label: "Connect",
+    selectors: ['button[data-testid*="connect"]', '[role="button"][data-testid*="connect"]'],
+    buttonNames: [/^connect$/i, /^connect wallet$/i]
+  },
+  approve: {
+    key: "approve",
+    label: "Approve",
+    selectors: [
+      'button[data-testid*="approve"]',
+      '[role="button"][data-testid*="approve"]',
+      'button[data-testid*="allow"]'
+    ],
+    buttonNames: [/^approve$/i, /^allow$/i, /^approve and continue$/i]
+  },
+  confirm: {
+    key: "confirm",
+    label: "Confirm",
+    selectors: [
+      '[data-testid="confirm-footer-button"]',
+      '[data-testid="confirm-btn"]',
+      '[data-testid="confirmation-submit-button"]',
+      'button[data-testid*="confirm"]',
+      'button[data-testid*="submit"]'
+    ],
+    buttonNames: [/^confirm$/i, /^submit$/i]
+  },
+  sign: {
+    key: "sign",
+    label: "Sign",
+    selectors: [
+      '[data-testid="signature-request-footer__sign-button"]',
+      'button[data-testid*="signature"][data-testid*="sign"]',
+      'button[data-testid*="sign"]'
+    ],
+    buttonNames: [/^sign$/i, /^sign message$/i, /^sign typed data$/i]
+  },
+  switchNetwork: {
+    key: "switchNetwork",
+    label: "Switch network",
+    selectors: ['button[data-testid*="switch-network"]', '[role="button"][data-testid*="switch-network"]'],
+    buttonNames: [/^switch network$/i, /^switch to .+$/i]
+  },
+  addNetwork: {
+    key: "addNetwork",
+    label: "Add network",
+    selectors: ['button[data-testid*="add-network"]', '[role="button"][data-testid*="add-network"]'],
+    buttonNames: [/^add network$/i, /^add suggested network$/i]
+  },
+  gotIt: {
+    key: "gotIt",
+    label: "Got it",
+    selectors: [
+      'button[data-testid*="got-it"]',
+      '[role="button"][data-testid*="got-it"]',
+      'button[data-testid*="done"]'
+    ],
+    buttonNames: [/^got it$/i, /^done$/i, /^okay$/i, /^ok$/i]
+  }
+};
+const METAMASK_ACTION_PLANS: Record<MetaMaskPopupKind, MetaMaskActionKey[]> = {
+  connect: ["next", "connect", "approve", "confirm", "gotIt"],
+  signature: ["sign", "confirm", "approve", "next", "gotIt"],
+  transaction: ["next", "confirm", "approve", "gotIt"],
+  network: ["approve", "switchNetwork", "addNetwork", "confirm", "next", "gotIt"],
+  approval: ["approve", "confirm", "next", "gotIt"],
+  generic: ["next", "connect", "approve", "confirm", "sign", "switchNetwork", "addNetwork", "gotIt"]
+};
+
+function classifyMetaMaskPopupKind(source: string): MetaMaskPopupKind {
+  if (/\b(signature request|sign message|sign typed data|typed data|review signature|signature)\b/i.test(source)) {
+    return "signature";
+  }
+  if (/\b(confirm transaction|transaction request|gas fee|max fee|network fee|nonce|spending cap)\b/i.test(source)) {
+    return "transaction";
+  }
+  if (/\b(add network|switch network|allow this site to switch|allow this site to add)\b/i.test(source)) {
+    return "network";
+  }
+  if (/\b(connect with metamask|connect this account|select an account|connect wallet|connect)\b/i.test(source)) {
+    return "connect";
+  }
+  if (/\b(permission|permissions request|approve|allow)\b/i.test(source)) {
+    return "approval";
+  }
+  return "generic";
+}
+
+async function locatorIsInteractable(locator: Locator): Promise<boolean> {
+  try {
+    return (await locator.isVisible({ timeout: 300 })) && (await locator.isEnabled({ timeout: 300 }));
+  } catch {
+    return false;
+  }
+}
+
+async function readLocatorLabel(locator: Locator): Promise<string> {
+  const label = await locator
+    .evaluate((element) => {
+      const htmlElement = element as HTMLElement;
+      const text = htmlElement.innerText || htmlElement.textContent || "";
+      const ariaLabel = element.getAttribute("aria-label") || "";
+      const inputValue = element instanceof HTMLInputElement ? element.value : "";
+      return (ariaLabel || inputValue || text).trim();
+    })
+    .catch(() => "");
+
+  return normalizeVisibleText(label);
+}
+
+async function readMetaMaskPopupState(popupPage: Page): Promise<MetaMaskPopupState> {
+  const url = popupPage.url();
+  const title = normalizeVisibleText(await popupPage.title().catch(() => "MetaMask"));
+  const bodyText = normalizeVisibleText(await popupPage.locator("body").innerText().catch(() => ""));
+  const source = `${url} ${title} ${bodyText}`;
+
+  return {
+    url,
+    title,
+    bodyText,
+    kind: classifyMetaMaskPopupKind(source),
+    fingerprint: normalizeVisibleText(source).toLowerCase().slice(0, 600)
+  };
+}
+
+async function isMetaMaskUnlockScreen(popupPage: Page, state: MetaMaskPopupState): Promise<boolean> {
+  if (!/\bunlock\b/i.test(`${state.title} ${state.bodyText}`)) {
+    return false;
+  }
+
+  const passwordField = popupPage.locator('input[type="password"]').first();
+  const unlockButton = popupPage.getByRole("button", { name: /^unlock$/i }).first();
+  return (await locatorIsInteractable(passwordField)) && (await locatorIsInteractable(unlockButton));
+}
+
+async function advanceMetaMaskReview(popupPage: Page): Promise<boolean> {
+  let progressed = false;
+  const scrollSelectors = [
+    '[data-testid="page-scroll-down"]',
+    '[data-testid*="scroll-down"]',
+    '[data-testid*="scroll-button"]'
+  ];
+
+  for (const selector of scrollSelectors) {
+    const scrollButton = popupPage.locator(selector).first();
+    try {
+      if (await scrollButton.isVisible({ timeout: 250 })) {
+        await scrollButton.click({ timeout: 1000 });
+        progressed = true;
+        await popupPage.waitForTimeout(300);
+      }
+    } catch {
+      // The scroll affordance is optional across MetaMask screens.
+    }
+  }
+
+  const scrolledProgrammatically = await popupPage
+    .evaluate(() => {
+      const candidates = Array.from(document.querySelectorAll<HTMLElement>("main, section, article, div"))
+        .filter((element) => {
+          const style = window.getComputedStyle(element);
+          return /(auto|scroll)/i.test(style.overflowY) && element.scrollHeight > element.clientHeight + 24;
+        })
+        .sort((left, right) => right.scrollHeight - right.clientHeight - (left.scrollHeight - left.clientHeight));
+
+      const scrollingRoot =
+        document.scrollingElement instanceof HTMLElement ? document.scrollingElement : document.documentElement;
+      const target = candidates[0] ?? scrollingRoot;
+      if (!target) {
+        return false;
+      }
+
+      const before = target.scrollTop;
+      target.scrollTop = target.scrollHeight;
+      return target.scrollTop > before;
+    })
+    .catch(() => false);
+
+  if (scrolledProgrammatically) {
+    progressed = true;
+    await popupPage.waitForTimeout(300);
+  }
+
+  return progressed;
+}
+
+async function resolveMetaMaskActionLocator(
+  popupPage: Page,
+  definition: MetaMaskActionDefinition
+): Promise<Locator | null> {
+  for (const selector of definition.selectors) {
+    const locator = popupPage.locator(selector).first();
+    if (await locatorIsInteractable(locator)) {
+      return locator;
+    }
+  }
+
+  for (const pattern of definition.buttonNames) {
+    const locator = popupPage.getByRole("button", { name: pattern }).first();
+    if (await locatorIsInteractable(locator)) {
+      return locator;
+    }
+  }
+
+  for (const pattern of definition.buttonNames) {
+    const locator = popupPage
+      .locator('button, [role="button"], input[type="button"], input[type="submit"]', { hasText: pattern })
+      .first();
+    if (await locatorIsInteractable(locator)) {
+      return locator;
+    }
+  }
+
+  return null;
+}
+
+async function captureMetaMaskPopupScreenshot(
+  popupPage: Page,
+  runDir: string,
+  suffix: string
+): Promise<string | null> {
+  const filename = `metamask-${Date.now()}-${suffix}.png`;
+  const targetPath = path.join(runDir, filename);
+  try {
+    await popupPage.screenshot({ path: targetPath, animations: "disabled" });
+    return filename;
+  } catch {
+    return null;
+  }
+}
+
+async function clickMetaMaskAction(args: {
+  popupPage: Page;
+  state: MetaMaskPopupState;
+  definition: MetaMaskActionDefinition;
+  locator: Locator;
+  runDir: string;
+  rawEvents: unknown[];
+  runtimeState: MetaMaskRuntimeState;
+  getCurrentTaskRef: () => ActiveTaskRef | null;
+}): Promise<void> {
+  const actualLabel = (await readLocatorLabel(args.locator)) || args.definition.label;
+  const interactionTime = new Date().toISOString();
+  const beforeScreenshot = await captureMetaMaskPopupScreenshot(args.popupPage, args.runDir, "before");
+
+  await args.locator.scrollIntoViewIfNeeded().catch(() => undefined);
+  await args.locator.click({ timeout: 3000 });
+  await args.popupPage.waitForTimeout(METAMASK_WAIT_MS);
+
+  const afterScreenshot = !args.popupPage.isClosed()
+    ? await captureMetaMaskPopupScreenshot(args.popupPage, args.runDir, "after")
+    : null;
+  args.runtimeState.lastActionAt = Date.now();
+
+  args.rawEvents.push({
+    type: "metamask_popup_action",
+    time: interactionTime,
+    action: args.definition.key,
+    label: actualLabel,
+    popupKind: args.state.kind,
+    url: args.state.url,
+    note: `Auto-clicked '${actualLabel}' in MetaMask ${args.state.kind} flow.`,
+    beforeScreenshot,
+    afterScreenshot
+  });
+
+  const taskRef = args.getCurrentTaskRef();
+  if (!taskRef) {
+    return;
+  }
+
+  taskRef.step += 1;
+  const activeStep = taskRef.step;
+  taskRef.history.push({
+    time: interactionTime,
+    task: taskRef.name,
+    step: activeStep,
+    url: args.state.url,
+    title: args.state.title,
+    decision: {
+      thought: `Automatically approving MetaMask ${args.state.kind} request: ${actualLabel}`,
+      stepNumber: activeStep,
+      instructionQuote: "MetaMask Approval",
+      action: "click",
+      target: actualLabel,
+      target_id: "",
+      text: "",
+      expectation: "The MetaMask request should be approved and the popup should close or advance.",
+      friction: "none"
+    },
+    result: {
+      success: true,
+      note: `Auto-clicked '${actualLabel}' in MetaMask popup.`,
+      stateChanged: true,
+      beforeScreenshotPath: beforeScreenshot ?? undefined,
+      afterScreenshotPath: afterScreenshot ?? undefined
+    }
+  });
+}
+
+async function handleMetaMaskPopup(args: {
+  popupPage: Page;
+  runDir: string;
+  rawEvents: unknown[];
+  runtimeState: MetaMaskRuntimeState;
+  getCurrentTaskRef: () => ActiveTaskRef | null;
+}): Promise<void> {
+  try {
+    debug("Popup detected, waiting for URL...");
+    await args.popupPage
+      .waitForURL((url) => url.toString().includes(METAMASK_EXTENSION_URL_PATTERN), { timeout: 3000 })
+      .catch(() => undefined);
+
+    const popupUrl = args.popupPage.url();
+    if (!popupUrl.includes(METAMASK_EXTENSION_URL_PATTERN)) {
+      debug("Bailing from popup handler: not an extension URL", { url: popupUrl });
+      return;
+    }
+
+    await args.popupPage.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await args.popupPage.waitForTimeout(METAMASK_WAIT_MS);
+    args.runtimeState.activePopupCount += 1;
+    args.runtimeState.lastDetectedAt = Date.now();
+    args.popupPage.once("close", () => {
+      args.runtimeState.activePopupCount = Math.max(0, args.runtimeState.activePopupCount - 1);
+      args.runtimeState.lastClosedAt = Date.now();
+    });
+
+    let attempts = 0;
+    let idleAttempts = 0;
+    let lastClickedFingerprint = "";
+    let lastClickAt = 0;
+    let lastState = await readMetaMaskPopupState(args.popupPage);
+
+    args.rawEvents.push({
+      type: "metamask_popup_detected",
+      time: new Date().toISOString(),
+      url: lastState.url,
+      title: lastState.title,
+      popupKind: lastState.kind,
+      note: `MetaMask extension popup detected for a ${lastState.kind} flow.`
+    });
+
+    debug("MetaMask popup detected", { url: lastState.url, kind: lastState.kind, title: lastState.title });
+
+    while (!args.popupPage.isClosed() && attempts < METAMASK_MAX_ATTEMPTS) {
+      attempts++;
+      lastState = await readMetaMaskPopupState(args.popupPage);
+
+      if (await isMetaMaskUnlockScreen(args.popupPage, lastState)) {
+        args.rawEvents.push({
+          type: "metamask_popup_blocked",
+          time: new Date().toISOString(),
+          url: lastState.url,
+          title: lastState.title,
+          popupKind: lastState.kind,
+          note: "MetaMask is locked. Unlock the extension profile before running signing or confirmation flows."
+        });
+        return;
+      }
+
+      if (lastState.kind === "signature") {
+        await advanceMetaMaskReview(args.popupPage).catch(() => undefined);
+      }
+
+      const plan = METAMASK_ACTION_PLANS[lastState.kind] ?? METAMASK_ACTION_PLANS.generic;
+      let clickedAction = false;
+
+      for (const actionKey of plan) {
+        const definition = METAMASK_ACTIONS[actionKey];
+        const locator = await resolveMetaMaskActionLocator(args.popupPage, definition);
+        if (!locator) {
+          continue;
+        }
+
+        const clickFingerprint = `${lastState.fingerprint}|${definition.key}`;
+        const now = Date.now();
+        if (clickFingerprint === lastClickedFingerprint && now - lastClickAt < METAMASK_REPEAT_CLICK_COOLDOWN_MS) {
+          continue;
+        }
+
+        await clickMetaMaskAction({
+          popupPage: args.popupPage,
+          state: lastState,
+          definition,
+          locator,
+          runDir: args.runDir,
+          rawEvents: args.rawEvents,
+          runtimeState: args.runtimeState,
+          getCurrentTaskRef: args.getCurrentTaskRef
+        });
+        clickedAction = true;
+        idleAttempts = 0;
+        lastClickedFingerprint = clickFingerprint;
+        lastClickAt = now;
+        break;
+      }
+
+      if (clickedAction) {
+        continue;
+      }
+
+      idleAttempts++;
+      if (idleAttempts === 1 || idleAttempts % 10 === 0) {
+        args.rawEvents.push({
+          type: "metamask_popup_waiting",
+          time: new Date().toISOString(),
+          url: lastState.url,
+          title: lastState.title,
+          popupKind: lastState.kind,
+          attempts,
+          note: `MetaMask popup is still open without a clickable approval target. Visible content: '${lastState.bodyText.slice(0, 200) || "n/a"}'.`
+        });
+      }
+
+      await advanceMetaMaskReview(args.popupPage).catch(() => undefined);
+      await args.popupPage.waitForTimeout(800);
+    }
+
+    if (!args.popupPage.isClosed()) {
+      args.rawEvents.push({
+        type: "metamask_popup_timeout",
+        time: new Date().toISOString(),
+        url: lastState.url,
+        title: lastState.title,
+        popupKind: lastState.kind,
+        note: `MetaMask popup remained open after ${METAMASK_MAX_ATTEMPTS} checks without a completed approval flow.`
+      });
+    }
+  } catch (error) {
+    args.rawEvents.push({
+      type: "metamask_popup_error",
+      time: new Date().toISOString(),
+      note: `MetaMask popup handler error: ${cleanErrorMessage(error)}`
+    });
+  }
+}
+
+function pageLooksLikeWalletFlowIsPending(pageState: PageState): boolean {
+  return WALLET_PENDING_PATTERN.test(`${pageState.title} ${pageState.visibleText}`);
 }
 
 async function pageStillNeedsOtpVerification(page: Page): Promise<boolean> {
@@ -1108,6 +1610,9 @@ export async function runTaskSuite(options: RunOptions): Promise<{
   if (storageStatePath) {
     contextOptions.storageState = storageStatePath;
   }
+  if (config.recordVideo) {
+    contextOptions.recordVideo = { dir: options.runDir };
+  }
 
   const rawEvents: unknown[] = [];
   const taskResults: TaskRunResult[] = [];
@@ -1117,10 +1622,22 @@ export async function runTaskSuite(options: RunOptions): Promise<{
   let page: Page | null = null;
   let signingRelay: SigningRelay | null = null;
   let browserTimezone = config.deviceTimezone;
+  const metaMaskRuntimeState: MetaMaskRuntimeState = {
+    activePopupCount: 0,
+    lastDetectedAt: 0,
+    lastActionAt: 0,
+    lastClosedAt: 0
+  };
   let accessibility: Awaited<ReturnType<typeof runAccessibilityAudit>> = {
     violations: [],
     error: "Accessibility audit did not run because the session ended before it reached the audit phase."
   };
+  let currentTaskRef: {
+    name: string;
+    index: number;
+    history: TaskHistoryEntry[];
+    step: number;
+  } | null = null;
   let siteBrief: SiteBrief | null = null;
   let siteChecks: SiteChecks = {
     generatedAt: new Date().toISOString(),
@@ -1209,8 +1726,35 @@ export async function runTaskSuite(options: RunOptions): Promise<{
       });
     }
 
-    browser = await chromium.launch(await resolveLaunchOptions({ headed: options.headed }));
-    context = await browser.newContext(contextOptions);
+    const metamaskExtensionPath = getMetaMaskExtensionPath();
+    const metaMaskBrowserMode = Boolean(metamaskExtensionPath);
+    if (metaMaskBrowserMode) {
+      const configuredUserDataDir = getMetaMaskUserDataDir();
+      const defaultUserDataDir = path.join(process.env.HOME || process.cwd(), ".site-agent-metamask-profile");
+      const userDataDir = resolveLocalPath(configuredUserDataDir || defaultUserDataDir);
+
+      ensureDir(userDataDir);
+      rawEvents.push({
+        type: "metamask_profile",
+        time: new Date().toISOString(),
+        path: summarizeLocalPath(userDataDir),
+        persistent: Boolean(configuredUserDataDir),
+        note: configuredUserDataDir
+          ? `Launching MetaMask with persistent Chromium user data from '${summarizeLocalPath(userDataDir)}'.`
+          : `Launching MetaMask with the default persistent Chromium user data at '${summarizeLocalPath(
+              userDataDir
+            )}'. Set WALLET_METAMASK_USER_DATA_DIR to reuse a specific unlocked MetaMask profile.`
+      });
+
+      context = await chromium.launchPersistentContext(userDataDir, {
+        ...(await resolveLaunchOptions({ headed: options.headed })),
+        ...contextOptions
+      });
+      browser = context.browser();
+    } else {
+      browser = await chromium.launch(await resolveLaunchOptions({ headed: options.headed }));
+      context = await browser.newContext(contextOptions);
+    }
     await installPlaywrightPageCompat(context);
 
     // --- Web3 wallet injection ---
@@ -1236,44 +1780,15 @@ export async function runTaskSuite(options: RunOptions): Promise<{
           });
 
           // MetaMask popup auto-approve handler
-          if (walletConfig.metamaskExtensionPath) {
+          if (metaMaskBrowserMode) {
             context.on("page", async (popupPage: Page) => {
-              try {
-                const popupUrl = popupPage.url();
-                if (!popupUrl.includes("chrome-extension://")) {
-                  return;
-                }
-
-                debug("MetaMask popup detected", { url: popupUrl });
-                await popupPage.waitForLoadState("domcontentloaded").catch(() => undefined);
-                await popupPage.waitForTimeout(1500);
-
-                // Try common MetaMask approval buttons
-                const approvalLabels = ["Connect", "Confirm", "Sign", "Approve", "Next", "Got it"];
-                for (const label of approvalLabels) {
-                  const btn = popupPage.getByRole("button", { name: label }).first();
-                  try {
-                    if (await btn.isVisible({ timeout: 800 })) {
-                      await btn.click({ timeout: 3000 });
-                      await popupPage.waitForTimeout(600);
-                      rawEvents.push({
-                        type: "metamask_popup_action",
-                        time: new Date().toISOString(),
-                        label,
-                        note: `Auto-clicked '${label}' in MetaMask popup.`
-                      });
-                    }
-                  } catch {
-                    // button not found or click failed — try next
-                  }
-                }
-              } catch (error) {
-                rawEvents.push({
-                  type: "metamask_popup_error",
-                  time: new Date().toISOString(),
-                  note: `MetaMask popup handler error: ${cleanErrorMessage(error)}`
-                });
-              }
+              await handleMetaMaskPopup({
+                popupPage,
+                runDir: options.runDir,
+                rawEvents,
+                runtimeState: metaMaskRuntimeState,
+                getCurrentTaskRef: () => currentTaskRef
+              });
             });
           }
         }
@@ -1392,6 +1907,12 @@ export async function runTaskSuite(options: RunOptions): Promise<{
       const history: TaskHistoryEntry[] = [];
       const taskNotes: string[] = [];
       const pageSignatures: string[] = [];
+      currentTaskRef = {
+        name: task.name,
+        index,
+        history,
+        step: 0
+      };
 
       const resetNavigation = await navigateToBaseUrl({
         page,
@@ -1406,6 +1927,10 @@ export async function runTaskSuite(options: RunOptions): Promise<{
       }
 
       for (let step = 1; step <= perTaskStepCap; step += 1) {
+        if (currentTaskRef) {
+          currentTaskRef.step = Math.max(currentTaskRef.step, step - 1) + 1;
+        }
+        const activeStep = currentTaskRef ? currentTaskRef.step : step;
         const remainingSessionMs = sessionDeadline - Date.now();
         if (remainingSessionMs <= 0) {
           rawEvents.push({
@@ -1456,7 +1981,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
               type: "auto_auth_start",
               time: new Date().toISOString(),
               task: task.name,
-              step,
+              step: activeStep,
               url: pageState.url,
               authKind: authWall.kind,
               note: `Detected an auth wall during task execution and will attempt automatic signup/login: ${authWall.reason}`
@@ -1477,7 +2002,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
               type: "auto_auth_result",
               time: new Date().toISOString(),
               task: task.name,
-              step,
+              step: activeStep,
               status: authExecution.status,
               accessConfirmed: authExecution.accessConfirmed,
               accountEmail: authExecution.accountEmail || null,
@@ -1555,21 +2080,51 @@ export async function runTaskSuite(options: RunOptions): Promise<{
               remainingSeconds: Math.max(1, Math.floor((sessionDeadline - Date.now()) / 1000)),
               llm
             });
-        const decision = planning.decision;
+        let decision = planning.decision;
 
         if (planning.fallbackReason) {
           rawEvents.push({
             type: "planner_fallback",
             time: new Date().toISOString(),
             task: task.name,
-            step,
+            step: activeStep,
             url: pageState.url,
             note: `Planner request did not finish cleanly, so a deterministic fallback action was used (${decision.action}${decision.target ? ` '${decision.target}'` : ""}): ${planning.fallbackReason}`
           });
           taskNotes.push(
-            `The agent used a heuristic fallback action at step ${step} because the planner did not respond in time: ${planning.fallbackReason}`
+            `The agent used a heuristic fallback action at step ${activeStep} because the planner did not respond in time: ${planning.fallbackReason}`
           );
-          warn(`Planner fallback for '${task.name}' step ${step} at '${pageState.url}': ${planning.fallbackReason}`);
+          warn(`Planner fallback for '${task.name}' step ${activeStep} at '${pageState.url}': ${planning.fallbackReason}`);
+        }
+
+        const metaMaskFlowLooksPending =
+          Boolean(metamaskExtensionPath) &&
+          (pageLooksLikeWalletFlowIsPending(pageState) ||
+            metaMaskRuntimeState.activePopupCount > 0 ||
+            Date.now() - metaMaskRuntimeState.lastDetectedAt < 15000 ||
+            Date.now() - metaMaskRuntimeState.lastActionAt < 10000);
+
+        if (!shouldStop && decision.action === "stop" && metaMaskFlowLooksPending) {
+          rawEvents.push({
+            type: "metamask_pending_wait",
+            time: new Date().toISOString(),
+            task: task.name,
+            step: activeStep,
+            url: pageState.url,
+            note: "A MetaMask interaction still appears to be in flight, so the runner will wait instead of stopping early."
+          });
+          decision = {
+            thought:
+              "A MetaMask interaction appears to still be pending, so pause briefly instead of stopping while the wallet popup opens or finishes auto-approval.",
+            stepNumber: null,
+            instructionQuote: decision.instructionQuote,
+            action: "wait",
+            target_id: "",
+            target: "",
+            text: "",
+            expectation: "The MetaMask popup should appear, update, or finish auto-approval.",
+            friction: "low"
+          };
         }
 
         const preparedClickResolution =
@@ -1583,7 +2138,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
                 runDir: options.runDir,
                 taskName: task.name,
                 taskIndex: index,
-                step,
+                step: activeStep,
                 phase: "before",
                 rawEvents
               })
@@ -1607,7 +2162,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
                 runDir: options.runDir,
                 taskName: task.name,
                 taskIndex: index,
-                step,
+                step: activeStep,
                 phase: "after",
                 rawEvents
               })
@@ -1620,7 +2175,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
         const entry: TaskHistoryEntry = {
           time: new Date().toISOString(),
           task: task.name,
-          step,
+          step: activeStep,
           url: page.url(),
           title: await page.title().catch(() => ""),
           decision,
@@ -1661,6 +2216,13 @@ export async function runTaskSuite(options: RunOptions): Promise<{
             taskNotes.push(`OTP code was retrieved from email and filled into the verification field.`);
           } else if (otpResult.error) {
             taskNotes.push(`OTP retrieval: ${otpResult.error}`);
+            
+            // Halt execution completely if OTP retrieval fails so the agent does not wander
+            result.success = false;
+            result.stop = true;
+            result.note += ` (Stopped due to OTP retrieval failure: ${otpResult.error})`;
+            history[history.length - 1]!.result = result;
+            break;
           }
         }
 
@@ -1692,17 +2254,26 @@ export async function runTaskSuite(options: RunOptions): Promise<{
     }
 
     const currentStorageState = context ? await context.storageState().catch(() => undefined) : undefined;
+    const siteChecksBrowser = browser ?? context?.browser() ?? null;
     const remainingSiteChecksBudgetMs = Math.max(0, sessionDeadline - Date.now());
-    siteChecks = await runSiteChecks({
-      browser,
-      baseUrl: options.baseUrl,
-      ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
-      browserTimezone,
-      storageState: currentStorageState,
-      rawEvents,
-      taskResults,
-      budgetMs: remainingSiteChecksBudgetMs
-    });
+    if (siteChecksBrowser) {
+      siteChecks = await runSiteChecks({
+        browser: siteChecksBrowser,
+        baseUrl: options.baseUrl,
+        ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
+        browserTimezone,
+        storageState: currentStorageState,
+        rawEvents,
+        taskResults,
+        budgetMs: remainingSiteChecksBudgetMs
+      });
+    } else {
+      rawEvents.push({
+        type: "site_checks_skipped",
+        time: new Date().toISOString(),
+        note: "Skipped site checks because no browser instance was available after the MetaMask session."
+      });
+    }
 
     const remainingAccessibilityBudgetMs = sessionDeadline - Date.now();
     accessibility =

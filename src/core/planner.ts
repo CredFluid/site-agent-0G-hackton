@@ -6,7 +6,8 @@ import { BROWSER_AGENT_PROMPT } from "../prompts/browserAgent.js";
 import {
   scoreFormFieldTargetMatch,
   inferFormFieldValue as inferProfileFormFieldValue,
-  isPlaceholderFieldValue as isPlaceholderProfileFieldValue
+  isPlaceholderFieldValue as isPlaceholderProfileFieldValue,
+  shouldCheckField
 } from "./formHeuristics.js";
 import { buildTaskDirectiveSummary, parseTaskDirectives, type TaskDirective } from "./taskDirectives.js";
 import {
@@ -304,9 +305,21 @@ function enforceTargetIdDecision(args: {
   }
 
   if (decision.action === "type") {
-    return decision.target_id && findFormFieldByTargetId(args.pageState, decision.target_id)
-      ? decision
-      : buildInvalidTargetIdStopDecision({ pageState: args.pageState, decision });
+    const fieldTarget = decision.target_id ? findFormFieldByTargetId(args.pageState, decision.target_id) : null;
+    if (!fieldTarget) {
+      return buildInvalidTargetIdStopDecision({ pageState: args.pageState, decision });
+    }
+
+    const inferredValue = inferFormFieldValue(fieldTarget, args.pageState.url);
+    if (inferredValue && inferredValue !== decision.text && !shouldCheckField(inferredValue)) {
+      return {
+        ...decision,
+        text: inferredValue,
+        thought: decision.thought + ` (Overriding LLM text '${decision.text}' with strictly generated profile value).`
+      };
+    }
+
+    return decision;
   }
 
   if (decision.target_id || decision.target) {
@@ -874,6 +887,15 @@ function buildFormFirstDecision(args: {
   };
 }
 
+function isOtpTriggerClickDecision(decision: PlannerDecision): boolean {
+  if (decision.action !== "click") {
+    return false;
+  }
+
+  const targetLabel = normalizeKey(decision.target || decision.instructionQuote || "");
+  return /\b(?:send\s*(?:otp|code)|get\s*(?:otp|code)|verify\s*email|request\s*(?:otp|code))\b/.test(targetLabel);
+}
+
 function enforceFormFirstDecision(args: {
   taskGoal: string;
   history: TaskHistoryEntry[];
@@ -881,6 +903,13 @@ function enforceFormFirstDecision(args: {
   decision: PlannerDecision;
 }): PlannerDecision {
   if (taskHasPendingExplicitDirective(args.taskGoal, args.history)) {
+    return args.decision;
+  }
+
+  // Allow OTP trigger clicks to pass through even when there are pending form
+  // fields — the verification step must not be deferred until all fields are
+  // filled because many sites gate remaining fields behind OTP completion.
+  if (isOtpTriggerClickDecision(args.decision)) {
     return args.decision;
   }
 
@@ -997,6 +1026,12 @@ function enforceOrderedTaskDirectives(args: {
         continue;
       }
 
+      // Allow OTP trigger clicks to pass through even during a fill_visible_form
+      // directive — the OTP step is part of completing the form, not a deviation.
+      if (isOtpTriggerClickDecision(args.decision)) {
+        return args.decision;
+      }
+
       const pendingField = findFirstPendingFormField(args.pageState);
       if (!pendingField) {
         continue;
@@ -1012,6 +1047,12 @@ function enforceOrderedTaskDirectives(args: {
     if (directive.action === "submit") {
       if (!args.pageState.formsPresent) {
         continue;
+      }
+
+      // Allow OTP trigger clicks through even during a submit directive —
+      // the OTP must be completed before the form can be submitted.
+      if (isOtpTriggerClickDecision(args.decision)) {
+        return args.decision;
       }
 
       const pendingField = findFirstPendingFormField(args.pageState);
@@ -1449,20 +1490,11 @@ export type PlannerResolution = {
   fallbackReason?: string;
 };
 
-function enforceOtpTriggerBeforeSubmit(args: {
+function enforceOtpTriggerPrioritization(args: {
   pageState: PageState;
   history: TaskHistoryEntry[];
   decision: PlannerDecision;
 }): PlannerDecision {
-  // Only intercept click actions that look like a form submit
-  if (args.decision.action !== "click") {
-    return args.decision;
-  }
-
-  const targetLabel = normalizeKey(args.decision.target || args.decision.instructionQuote || "");
-  if (!isSubmitLikeInteractiveLabel(targetLabel)) {
-    return args.decision;
-  }
 
   // Check if the email field is filled
   const emailFieldFilled = args.pageState.formFields.some((field) => {
@@ -1505,7 +1537,7 @@ function enforceOtpTriggerBeforeSubmit(args: {
   });
 
   return {
-    thought: `The form has an unclicked OTP/verification trigger '${target}' that must be completed before submitting. Redirecting from '${args.decision.target}' to '${target}'.`,
+    thought: `The form has an unclicked OTP/verification trigger '${target}' that must be completed before proceeding with the rest of the form. Redirecting from '${args.decision.target || args.decision.action}' to '${target}'.`,
     stepNumber: stepReference.stepNumber,
     instructionQuote: stepReference.instructionQuote,
     action: "click",
@@ -1531,7 +1563,7 @@ function finalizePlannerDecision(args: {
         taskGoal: args.task.goal,
         history: args.history,
         pageState: args.pageState,
-        decision: enforceOtpTriggerBeforeSubmit({
+        decision: enforceOtpTriggerPrioritization({
           pageState: args.pageState,
           history: args.history,
           decision: enforceOrderedTaskDirectives({

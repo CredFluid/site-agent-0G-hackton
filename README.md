@@ -314,8 +314,9 @@ If you specifically need to test how a dApp interacts with the MetaMask UI, you 
 3. Set the environment variable in `.env`:
    ```bash
    WALLET_METAMASK_EXTENSION_PATH=/Users/YourUsername/Library/.../11.14.2_0
+   WALLET_METAMASK_USER_DATA_DIR=/Users/YourUsername/.site-agent-metamask-profile
    ```
-*Note: Using this mode forces the agent to run in headed (visible) mode.*
+*Note: Using this mode forces the agent to run in headed (visible) mode. For real MetaMask signing/confirm popups, point `WALLET_METAMASK_USER_DATA_DIR` at a persistent Chromium profile where MetaMask is already set up and unlocked.*
 
 ---
 

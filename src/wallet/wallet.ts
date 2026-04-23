@@ -9,7 +9,14 @@ dotenv.config();
 
 function normalizeOptionalString(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
+  if (!trimmed) return undefined;
+  
+  // Strip surrounding quotes if they exist
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1).trim() || undefined;
+  }
+  
+  return trimmed;
 }
 
 const WalletEnvSchema = z.object({
@@ -29,6 +36,10 @@ const WalletEnvSchema = z.object({
   WALLET_METAMASK_EXTENSION_PATH: z
     .string()
     .optional()
+    .transform((value: string | undefined) => normalizeOptionalString(value)),
+  WALLET_METAMASK_USER_DATA_DIR: z
+    .string()
+    .optional()
     .transform((value: string | undefined) => normalizeOptionalString(value))
 });
 
@@ -43,6 +54,7 @@ export type WalletConfig = {
   chainId: number;
   rpcUrl: string;
   metamaskExtensionPath?: string | undefined;
+  metamaskUserDataDir?: string | undefined;
 };
 
 type EthersWallet = {
@@ -132,6 +144,10 @@ export function getMetaMaskExtensionPath(): string | undefined {
   return parsed.WALLET_METAMASK_EXTENSION_PATH;
 }
 
+export function getMetaMaskUserDataDir(): string | undefined {
+  return parsed.WALLET_METAMASK_USER_DATA_DIR;
+}
+
 export async function getWalletConfig(): Promise<WalletConfig | null> {
   if (!isWalletConfigured()) {
     return null;
@@ -142,7 +158,8 @@ export async function getWalletConfig(): Promise<WalletConfig | null> {
     address: wallet.address,
     chainId: parsed.WALLET_CHAIN_ID,
     rpcUrl: parsed.WALLET_RPC_URL!,
-    metamaskExtensionPath: parsed.WALLET_METAMASK_EXTENSION_PATH
+    metamaskExtensionPath: parsed.WALLET_METAMASK_EXTENSION_PATH,
+    metamaskUserDataDir: parsed.WALLET_METAMASK_USER_DATA_DIR
   };
 }
 
@@ -175,7 +192,6 @@ export async function signTypedData(
  * Returns the transaction hash.
  */
 export async function sendTransaction(tx: Record<string, unknown>): Promise<string> {
-  const ethers = await loadEthers();
   const wallet = await resolveWallet();
   const signed = await wallet.signTransaction(tx);
   const provider = wallet.provider as { send: (method: string, params: unknown[]) => Promise<string> };

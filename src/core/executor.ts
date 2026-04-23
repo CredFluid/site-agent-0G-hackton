@@ -9,6 +9,7 @@ import {
 import {
   buildLooseAccessiblePattern,
   prepareLocatorForInteraction,
+  resolvePreferredFieldLocator,
   typeLikeHuman
 } from "./interaction.js";
 
@@ -16,6 +17,7 @@ type VisibleState = {
   url: string;
   title: string;
   textSnippet: string;
+  modalCount: number;
 };
 
 type FillableField = {
@@ -100,7 +102,10 @@ async function readVisibleState(page: Page): Promise<VisibleState> {
   const title = await page.title().catch(() => "");
   const url = page.url();
   const textSnippet = normalizeText(await page.locator("body").innerText().catch(() => "")).slice(0, 800);
-  return { url, title, textSnippet };
+  const modalCount = await page.evaluate(() => {
+    return document.querySelectorAll("dialog, [role='dialog'], .modal, [aria-modal='true']").length;
+  }).catch(() => 0);
+  return { url, title, textSnippet, modalCount };
 }
 
 async function captureClickNeighborhood(locator: Locator): Promise<string> {
@@ -127,7 +132,8 @@ function describeStateChange(before: VisibleState, after: VisibleState): {
   const stateChanged =
     before.url !== after.url ||
     normalizeText(before.title) !== normalizeText(after.title) ||
-    before.textSnippet !== after.textSnippet;
+    before.textSnippet !== after.textSnippet ||
+    before.modalCount !== after.modalCount;
 
   return {
     stateChanged,
@@ -352,17 +358,64 @@ function findBestFillableField(fields: FillableField[], target: string): Fillabl
   return ranked[0]?.field ?? null;
 }
 
-function getFillableFieldLocator(page: Page, field: FillableField): Locator {
-  return page.locator(`[data-site-agent-id="${escapeAttributeValue(field.agentId)}"]`).first();
+async function resolveFillableFieldLocator(page: Page, field: FillableField): Promise<{ locator: Locator; strategy: string }> {
+  const fallbackLocator = page.locator(`[data-site-agent-fill-field="${escapeAttributeValue(field.marker)}"]`).first();
+  return resolvePreferredFieldLocator({
+    page,
+    field,
+    fallbackLocator,
+    preferredNames: [field.label, field.placeholder, field.name, field.id].filter(Boolean)
+  });
+}
+
+async function readCheckedState(locator: Locator, inputType: string): Promise<boolean> {
+  return locator.isChecked().catch(async () => {
+    return locator
+      .evaluate((element, expectedType) => {
+        if (element instanceof HTMLInputElement) {
+          return element.checked;
+        }
+
+        const nested = element.querySelector(`input[type="${expectedType}"], input[type="checkbox"], input[type="radio"]`);
+        return nested instanceof HTMLInputElement ? nested.checked : false;
+      }, inputType)
+      .catch(() => false);
+  });
+}
+
+async function setCheckedStateWithDomFallback(locator: Locator, inputType: string): Promise<void> {
+  await locator.evaluate((element, expectedType) => {
+    const nested = element.querySelector(`input[type="${expectedType}"], input[type="checkbox"], input[type="radio"]`);
+    const target =
+      element instanceof HTMLInputElement
+        ? element
+        : nested instanceof HTMLInputElement
+          ? nested
+          : null;
+
+    if (!target) {
+      if (element instanceof HTMLElement) {
+        element.click();
+      }
+      return;
+    }
+
+    const prototype = window.HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "checked");
+    if (descriptor?.set) {
+      descriptor.set.call(target, true);
+    } else {
+      target.checked = true;
+    }
+
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+  }, inputType);
 }
 
 async function readFieldRuntimeState(locator: Locator, field: FillableField): Promise<FieldRuntimeState> {
   if (field.inputType === "checkbox" || field.inputType === "radio") {
-    const checked = await locator.isChecked().catch(async () => {
-      return locator
-        .evaluate((element) => (element instanceof HTMLInputElement ? element.checked : false))
-        .catch(() => false);
-    });
+    const checked = await readCheckedState(locator, field.inputType);
 
     return {
       value: checked ? "checked" : "",
@@ -428,18 +481,38 @@ async function fillFieldValue(args: {
   value: string;
 }): Promise<FillOperation> {
   if (shouldCheckField(args.value) && (args.field.inputType === "checkbox" || args.field.inputType === "radio")) {
-    const preparedLocator = await prepareLocatorForInteraction(args.locator);
+    const preparedLocator = await prepareLocatorForInteraction(args.locator).catch(() => args.locator.first());
+    const labelLocator = args.locator.locator("xpath=ancestor::label[1]").first();
+    const preparedLabelLocator = await prepareLocatorForInteraction(labelLocator).catch(() => null);
 
-    if (args.field.checked) {
+    if (args.field.checked || (await readCheckedState(preparedLocator, args.field.inputType).catch(() => false))) {
       return {
         expectedValue: "checked",
         mode: "check"
       };
     }
 
-    await preparedLocator.check({ force: true }).catch(async () => {
-      await preparedLocator.click({ force: true });
-    });
+    if (preparedLabelLocator) {
+      await preparedLabelLocator.click({ force: true }).catch(() => undefined);
+    }
+
+    let checkedAfterAttempt = await readCheckedState(preparedLocator, args.field.inputType).catch(() => false);
+    if (!checkedAfterAttempt) {
+      await preparedLocator.check({ force: true }).catch(async () => {
+        await preparedLocator.click({ force: true }).catch(() => undefined);
+      });
+      checkedAfterAttempt = await readCheckedState(preparedLocator, args.field.inputType).catch(() => false);
+    }
+
+    if (!checkedAfterAttempt && preparedLabelLocator) {
+      await preparedLabelLocator.click({ force: true }).catch(() => undefined);
+      checkedAfterAttempt = await readCheckedState(preparedLocator, args.field.inputType).catch(() => false);
+    }
+
+    if (!checkedAfterAttempt) {
+      await setCheckedStateWithDomFallback(preparedLocator, args.field.inputType).catch(() => undefined);
+    }
+
     return {
       expectedValue: "checked",
       mode: "check"
@@ -691,7 +764,8 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
         return { success: false, note: `Could not find input for '${target || targetId}'` };
       }
 
-      const locator = getFillableFieldLocator(page, matchedField);
+      const resolvedField = await resolveFillableFieldLocator(page, matchedField);
+      const locator = resolvedField.locator;
       const beforeFieldState = await readFieldRuntimeState(locator, matchedField).catch(() => ({
         value: "",
         checked: matchedField.checked ?? null
@@ -713,7 +787,7 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
         return {
           success: false,
           note: `Tried to fill '${target || targetId}', but the field did not keep the requested value`,
-          matchedBy: `target_id:${matchedField.tag}/${matchedField.inputType}`,
+          matchedBy: `target_id:${matchedField.tag}/${matchedField.inputType}:${resolvedField.strategy}`,
           destinationUrl: after.url,
           destinationTitle: after.title,
           stateChanged,
@@ -724,7 +798,7 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
       return {
         success: true,
         note: stateChanged ? `Filled '${target || targetId}'` : `Field '${target || targetId}' already held the requested value`,
-        matchedBy: `target_id:${matchedField.tag}/${matchedField.inputType}`,
+        matchedBy: `target_id:${matchedField.tag}/${matchedField.inputType}:${resolvedField.strategy}`,
         destinationUrl: after.url,
         destinationTitle: after.title,
         stateChanged,

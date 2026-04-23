@@ -65,7 +65,11 @@ const EnvSchema = z.object({
   PLAYWRIGHT_STORAGE_STATE_PATH: z
     .string()
     .optional()
-    .transform((value: string | undefined) => normalizeOptionalString(value))
+    .transform((value: string | undefined) => normalizeOptionalString(value)),
+  RECORD_VIDEO: z
+    .string()
+    .optional()
+    .transform((value: string | undefined) => value === "true")
 });
 
 const parsed = EnvSchema.parse(process.env);
@@ -96,6 +100,7 @@ export const config = {
   navigationTimeoutMs: parsed.NAVIGATION_TIMEOUT_MS,
   reportTtlDays: parsed.REPORT_TTL_DAYS,
   playwrightStorageStatePath: parsed.PLAYWRIGHT_STORAGE_STATE_PATH,
+  recordVideo: parsed.RECORD_VIDEO,
   desktopViewport: { width: 1440, height: 900 },
   mobileViewport: { width: 390, height: 844 }
 };
