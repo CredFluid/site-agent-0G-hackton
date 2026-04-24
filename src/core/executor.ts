@@ -4,13 +4,13 @@ import {
   findMatchingSelectOption,
   fitValueToField,
   scoreFormFieldTargetMatch,
-  shouldCheckField
+  shouldCheckField,
 } from "./formHeuristics.js";
 import {
   buildLooseAccessiblePattern,
   prepareLocatorForInteraction,
   resolvePreferredFieldLocator,
-  typeLikeHuman
+  typeLikeHuman,
 } from "./interaction.js";
 
 type VisibleState = {
@@ -52,6 +52,10 @@ export type PreparedClickAction = {
   clickIndicator?: ClickIndicator;
 };
 
+type ExecuteDecisionOptions = {
+  singleClickAttempt?: boolean;
+};
+
 const INTERSTITIAL_PATTERNS = [
   /just a moment/i,
   /verification successful/i,
@@ -60,7 +64,7 @@ const INTERSTITIAL_PATTERNS = [
   /security check/i,
   /access denied/i,
   /captcha/i,
-  /human verification/i
+  /human verification/i,
 ];
 
 function cleanErrorMessage(error: unknown): string {
@@ -101,10 +105,19 @@ function isInterstitialState(state: VisibleState): boolean {
 async function readVisibleState(page: Page): Promise<VisibleState> {
   const title = await page.title().catch(() => "");
   const url = page.url();
-  const textSnippet = normalizeText(await page.locator("body").innerText().catch(() => "")).slice(0, 800);
-  const modalCount = await page.evaluate(() => {
-    return document.querySelectorAll("dialog, [role='dialog'], .modal, [aria-modal='true']").length;
-  }).catch(() => 0);
+  const textSnippet = normalizeText(
+    await page
+      .locator("body")
+      .innerText()
+      .catch(() => ""),
+  ).slice(0, 800);
+  const modalCount = await page
+    .evaluate(() => {
+      return document.querySelectorAll(
+        "dialog, [role='dialog'], .modal, [aria-modal='true']",
+      ).length;
+    })
+    .catch(() => 0);
   return { url, title, textSnippet, modalCount };
 }
 
@@ -112,20 +125,27 @@ async function captureClickNeighborhood(locator: Locator): Promise<string> {
   try {
     return await locator.evaluate((element) => {
       const container =
-        element.closest("section, article, nav, main, aside, dialog, [role='dialog'], [role='tabpanel'], .modal, .card, .panel, .accordion") ||
-        element.parentElement;
+        element.closest(
+          "section, article, nav, main, aside, dialog, [role='dialog'], [role='tabpanel'], .modal, .card, .panel, .accordion",
+        ) || element.parentElement;
       if (!container) {
         return "";
       }
 
-      return (container.innerHTML || "").replace(/\s+/g, " ").trim().slice(0, 600);
+      return (container.innerHTML || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 600);
     });
   } catch {
     return "";
   }
 }
 
-function describeStateChange(before: VisibleState, after: VisibleState): {
+function describeStateChange(
+  before: VisibleState,
+  after: VisibleState,
+): {
   stateChanged: boolean;
   destinationLabel: string;
 } {
@@ -137,11 +157,13 @@ function describeStateChange(before: VisibleState, after: VisibleState): {
 
   return {
     stateChanged,
-    destinationLabel: normalizeText(after.title) || after.url
+    destinationLabel: normalizeText(after.title) || after.url,
   };
 }
 
-async function firstVisible(locators: Array<{ locator: Locator; name: string }>): Promise<{ locator: Locator; name: string } | null> {
+async function firstVisible(
+  locators: Array<{ locator: Locator; name: string }>,
+): Promise<{ locator: Locator; name: string } | null> {
   for (const item of locators) {
     try {
       if (await item.locator.first().isVisible({ timeout: 1200 })) {
@@ -155,7 +177,10 @@ async function firstVisible(locators: Array<{ locator: Locator; name: string }>)
   return null;
 }
 
-async function findClickTarget(page: Page, target: string): Promise<{ locator: Locator; name: string } | null> {
+async function findClickTarget(
+  page: Page,
+  target: string,
+): Promise<{ locator: Locator; name: string } | null> {
   const escapedTarget = escapeAttributeValue(target);
   const targetPattern = buildLooseAccessiblePattern(target);
 
@@ -164,28 +189,50 @@ async function findClickTarget(page: Page, target: string): Promise<{ locator: L
   }
 
   return firstVisible([
-    { locator: page.getByRole("button", { name: targetPattern }), name: "getByRole(button)" },
-    { locator: page.getByRole("link", { name: targetPattern }), name: "getByRole(link)" },
-    { locator: page.getByRole("tab", { name: targetPattern }), name: "getByRole(tab)" },
-    { locator: page.getByRole("menuitem", { name: targetPattern }), name: "getByRole(menuitem)" },
+    {
+      locator: page.getByRole("button", { name: targetPattern }),
+      name: "getByRole(button)",
+    },
+    {
+      locator: page.getByRole("link", { name: targetPattern }),
+      name: "getByRole(link)",
+    },
+    {
+      locator: page.getByRole("tab", { name: targetPattern }),
+      name: "getByRole(tab)",
+    },
+    {
+      locator: page.getByRole("menuitem", { name: targetPattern }),
+      name: "getByRole(menuitem)",
+    },
     {
       locator: page.locator(
-        `input[type="submit"][value*="${escapedTarget}" i], input[type="button"][value*="${escapedTarget}" i], input[type="reset"][value*="${escapedTarget}" i]`
+        `input[type="submit"][value*="${escapedTarget}" i], input[type="button"][value*="${escapedTarget}" i], input[type="reset"][value*="${escapedTarget}" i]`,
       ),
-      name: "input[value contains]"
+      name: "input[value contains]",
     },
     { locator: page.getByText(targetPattern), name: "getByText" },
-    { locator: page.locator(`[aria-label*="${escapedTarget}" i]`), name: "aria-label contains" }
+    {
+      locator: page.locator(`[aria-label*="${escapedTarget}" i]`),
+      name: "aria-label contains",
+    },
   ]);
 }
 
-async function findClickTargetById(page: Page, targetId: string): Promise<{ locator: Locator; name: string } | null> {
+async function findClickTargetById(
+  page: Page,
+  targetId: string,
+): Promise<{ locator: Locator; name: string } | null> {
   const normalizedTargetId = targetId.trim();
   if (!normalizedTargetId) {
     return null;
   }
 
-  const locator = page.locator(`[data-site-agent-id="${escapeAttributeValue(normalizedTargetId)}"]`).first();
+  const locator = page
+    .locator(
+      `[data-site-agent-id="${escapeAttributeValue(normalizedTargetId)}"]`,
+    )
+    .first();
   try {
     if (await locator.isVisible({ timeout: 1200 })) {
       return { locator, name: "target_id" };
@@ -197,7 +244,10 @@ async function findClickTargetById(page: Page, targetId: string): Promise<{ loca
   return null;
 }
 
-async function buildClickIndicator(locator: Locator, target: string): Promise<ClickIndicator | undefined> {
+async function buildClickIndicator(
+  locator: Locator,
+  target: string,
+): Promise<ClickIndicator | undefined> {
   await locator.scrollIntoViewIfNeeded().catch(() => undefined);
 
   const box = await locator.boundingBox().catch(() => null);
@@ -210,11 +260,14 @@ async function buildClickIndicator(locator: Locator, target: string): Promise<Cl
     y: box.y,
     width: box.width,
     height: box.height,
-    targetLabel: truncateLabel(normalizeText(target) || "Click target", 72)
+    targetLabel: truncateLabel(normalizeText(target) || "Click target", 72),
   };
 }
 
-export async function prepareClickDecision(page: Page, decision: PlannerDecision): Promise<{
+export async function prepareClickDecision(
+  page: Page,
+  decision: PlannerDecision,
+): Promise<{
   note?: string;
   preparedClick?: PreparedClickAction;
 }> {
@@ -224,16 +277,21 @@ export async function prepareClickDecision(page: Page, decision: PlannerDecision
   if (targetId) {
     const match = await findClickTargetById(page, targetId);
     if (!match) {
-      return { note: `Could not find numbered clickable element for target_id '${targetId}'` };
+      return {
+        note: `Could not find numbered clickable element for target_id '${targetId}'`,
+      };
     }
 
-    const clickIndicator = await buildClickIndicator(match.locator, targetLabel || targetId);
+    const clickIndicator = await buildClickIndicator(
+      match.locator,
+      targetLabel || targetId,
+    );
     return {
       preparedClick: {
         locator: match.locator,
         matchedBy: match.name,
-        ...(clickIndicator ? { clickIndicator } : {})
-      }
+        ...(clickIndicator ? { clickIndicator } : {}),
+      },
     };
   }
 
@@ -251,18 +309,27 @@ export async function prepareClickDecision(page: Page, decision: PlannerDecision
     preparedClick: {
       locator: match.locator,
       matchedBy: match.name,
-      ...(clickIndicator ? { clickIndicator } : {})
-    }
+      ...(clickIndicator ? { clickIndicator } : {}),
+    },
   };
 }
 
-async function collectVisibleFillableFields(page: Page): Promise<FillableField[]> {
+async function collectVisibleFillableFields(
+  page: Page,
+): Promise<FillableField[]> {
   const fields = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select"))
+    return Array.from(
+      document.querySelectorAll<
+        HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+      >("input, textarea, select"),
+    )
       .map((element, index) => {
         const rect = element.getBoundingClientRect();
         const style = window.getComputedStyle(element);
-        const inputType = element instanceof HTMLInputElement ? (element.type || "text").replace(/\s+/g, " ").trim().toLowerCase() : "";
+        const inputType =
+          element instanceof HTMLInputElement
+            ? (element.type || "text").replace(/\s+/g, " ").trim().toLowerCase()
+            : "";
 
         if (
           rect.width <= 0 ||
@@ -280,13 +347,18 @@ async function collectVisibleFillableFields(page: Page): Promise<FillableField[]
 
         const marker = String(index + 1);
         element.setAttribute("data-site-agent-fill-field", marker);
-        const agentId = (element.getAttribute("data-site-agent-id") || "").trim() || marker;
+        const agentId =
+          (element.getAttribute("data-site-agent-id") || "").trim() || marker;
         element.setAttribute("data-site-agent-id", agentId);
 
         const labelParts: string[] = [];
         if ("labels" in element && element.labels) {
           for (const label of Array.from(element.labels)) {
-            labelParts.push((label.innerText || label.textContent || "").replace(/\s+/g, " ").trim());
+            labelParts.push(
+              (label.innerText || label.textContent || "")
+                .replace(/\s+/g, " ")
+                .trim(),
+            );
           }
         }
 
@@ -295,22 +367,34 @@ async function collectVisibleFillableFields(page: Page): Promise<FillableField[]
           for (const id of ariaLabelledBy.split(/\s+/)) {
             const labelElement = document.getElementById(id);
             if (labelElement) {
-              labelParts.push((labelElement.textContent || "").replace(/\s+/g, " ").trim());
+              labelParts.push(
+                (labelElement.textContent || "").replace(/\s+/g, " ").trim(),
+              );
             }
           }
         }
 
         const closestLabel = element.closest("label");
         if (closestLabel) {
-          labelParts.push((closestLabel.innerText || closestLabel.textContent || "").replace(/\s+/g, " ").trim());
+          labelParts.push(
+            (closestLabel.innerText || closestLabel.textContent || "")
+              .replace(/\s+/g, " ")
+              .trim(),
+          );
         }
 
-        labelParts.push((element.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim());
+        labelParts.push(
+          (element.getAttribute("aria-label") || "")
+            .replace(/\s+/g, " ")
+            .trim(),
+        );
 
         const options =
           element instanceof HTMLSelectElement
             ? Array.from(element.options)
-                .map((option) => (option.textContent || "").replace(/\s+/g, " ").trim())
+                .map((option) =>
+                  (option.textContent || "").replace(/\s+/g, " ").trim(),
+                )
                 .filter(Boolean)
                 .slice(0, 60)
             : [];
@@ -318,22 +402,38 @@ async function collectVisibleFillableFields(page: Page): Promise<FillableField[]
         return {
           agentId,
           marker,
-          label: labelParts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim(),
-          placeholder: (element.getAttribute("placeholder") || "").replace(/\s+/g, " ").trim(),
-          name: (element.getAttribute("name") || "").replace(/\s+/g, " ").trim(),
+          label: labelParts
+            .filter(Boolean)
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim(),
+          placeholder: (element.getAttribute("placeholder") || "")
+            .replace(/\s+/g, " ")
+            .trim(),
+          name: (element.getAttribute("name") || "")
+            .replace(/\s+/g, " ")
+            .trim(),
           id: (element.id || "").replace(/\s+/g, " ").trim(),
           tag: element.tagName.toLowerCase(),
           inputType: inputType || element.tagName.toLowerCase(),
-          autocomplete: (element.getAttribute("autocomplete") || "").replace(/\s+/g, " ").trim().toLowerCase(),
-          inputMode: (element.getAttribute("inputmode") || "").replace(/\s+/g, " ").trim().toLowerCase(),
-          checked: element instanceof HTMLInputElement ? element.checked : undefined,
+          autocomplete: (element.getAttribute("autocomplete") || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase(),
+          inputMode: (element.getAttribute("inputmode") || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase(),
+          checked:
+            element instanceof HTMLInputElement ? element.checked : undefined,
           maxLength:
-            element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+            element instanceof HTMLInputElement ||
+            element instanceof HTMLTextAreaElement
               ? element.maxLength > 0
                 ? element.maxLength
                 : null
               : null,
-          options
+          options,
         };
       })
       .filter(Boolean);
@@ -346,11 +446,14 @@ function scoreFieldMatch(field: FillableField, target: string): number {
   return scoreFormFieldTargetMatch(field, target);
 }
 
-function findBestFillableField(fields: FillableField[], target: string): FillableField | null {
+function findBestFillableField(
+  fields: FillableField[],
+  target: string,
+): FillableField | null {
   const ranked = fields
     .map((field) => ({
       field,
-      score: scoreFieldMatch(field, target)
+      score: scoreFieldMatch(field, target),
     }))
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score);
@@ -358,17 +461,32 @@ function findBestFillableField(fields: FillableField[], target: string): Fillabl
   return ranked[0]?.field ?? null;
 }
 
-async function resolveFillableFieldLocator(page: Page, field: FillableField): Promise<{ locator: Locator; strategy: string }> {
-  const fallbackLocator = page.locator(`[data-site-agent-fill-field="${escapeAttributeValue(field.marker)}"]`).first();
+async function resolveFillableFieldLocator(
+  page: Page,
+  field: FillableField,
+): Promise<{ locator: Locator; strategy: string }> {
+  const fallbackLocator = page
+    .locator(
+      `[data-site-agent-fill-field="${escapeAttributeValue(field.marker)}"]`,
+    )
+    .first();
   return resolvePreferredFieldLocator({
     page,
     field,
     fallbackLocator,
-    preferredNames: [field.label, field.placeholder, field.name, field.id].filter(Boolean)
+    preferredNames: [
+      field.label,
+      field.placeholder,
+      field.name,
+      field.id,
+    ].filter(Boolean),
   });
 }
 
-async function readCheckedState(locator: Locator, inputType: string): Promise<boolean> {
+async function readCheckedState(
+  locator: Locator,
+  inputType: string,
+): Promise<boolean> {
   return locator.isChecked().catch(async () => {
     return locator
       .evaluate((element, expectedType) => {
@@ -376,16 +494,23 @@ async function readCheckedState(locator: Locator, inputType: string): Promise<bo
           return element.checked;
         }
 
-        const nested = element.querySelector(`input[type="${expectedType}"], input[type="checkbox"], input[type="radio"]`);
+        const nested = element.querySelector(
+          `input[type="${expectedType}"], input[type="checkbox"], input[type="radio"]`,
+        );
         return nested instanceof HTMLInputElement ? nested.checked : false;
       }, inputType)
       .catch(() => false);
   });
 }
 
-async function setCheckedStateWithDomFallback(locator: Locator, inputType: string): Promise<void> {
+async function setCheckedStateWithDomFallback(
+  locator: Locator,
+  inputType: string,
+): Promise<void> {
   await locator.evaluate((element, expectedType) => {
-    const nested = element.querySelector(`input[type="${expectedType}"], input[type="checkbox"], input[type="radio"]`);
+    const nested = element.querySelector(
+      `input[type="${expectedType}"], input[type="checkbox"], input[type="radio"]`,
+    );
     const target =
       element instanceof HTMLInputElement
         ? element
@@ -413,13 +538,16 @@ async function setCheckedStateWithDomFallback(locator: Locator, inputType: strin
   }, inputType);
 }
 
-async function readFieldRuntimeState(locator: Locator, field: FillableField): Promise<FieldRuntimeState> {
+async function readFieldRuntimeState(
+  locator: Locator,
+  field: FillableField,
+): Promise<FieldRuntimeState> {
   if (field.inputType === "checkbox" || field.inputType === "radio") {
     const checked = await readCheckedState(locator, field.inputType);
 
     return {
       value: checked ? "checked" : "",
-      checked
+      checked,
     };
   }
 
@@ -430,38 +558,51 @@ async function readFieldRuntimeState(locator: Locator, field: FillableField): Pr
           return "";
         }
 
-        return ((element.selectedOptions[0]?.textContent || element.value || "") as string).replace(/\s+/g, " ").trim();
+        return (
+          (element.selectedOptions[0]?.textContent ||
+            element.value ||
+            "") as string
+        )
+          .replace(/\s+/g, " ")
+          .trim();
       })
       .catch(() => "");
 
     return {
       value: normalizeText(value),
-      checked: null
+      checked: null,
     };
   }
 
-  const value = await locator
-    .inputValue()
-    .catch(async () => {
-      return locator
-        .evaluate((element) => {
-          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-            return element.value;
-          }
+  const value = await locator.inputValue().catch(async () => {
+    return locator
+      .evaluate((element) => {
+        if (
+          element instanceof HTMLInputElement ||
+          element instanceof HTMLTextAreaElement
+        ) {
+          return element.value;
+        }
 
-          return "";
-        })
-        .catch(() => "");
-    });
+        return "";
+      })
+      .catch(() => "");
+  });
 
   return {
     value: normalizeText(value),
-    checked: null
+    checked: null,
   };
 }
 
-function didFieldStateChange(before: FieldRuntimeState, after: FieldRuntimeState): boolean {
-  return normalizeKey(before.value) !== normalizeKey(after.value) || before.checked !== after.checked;
+function didFieldStateChange(
+  before: FieldRuntimeState,
+  after: FieldRuntimeState,
+): boolean {
+  return (
+    normalizeKey(before.value) !== normalizeKey(after.value) ||
+    before.checked !== after.checked
+  );
 }
 
 function doesFieldStateMatchExpected(args: {
@@ -472,7 +613,10 @@ function doesFieldStateMatchExpected(args: {
     return args.after.checked === true;
   }
 
-  return normalizeKey(args.after.value) === normalizeKey(args.operation.expectedValue);
+  return (
+    normalizeKey(args.after.value) ===
+    normalizeKey(args.operation.expectedValue)
+  );
 }
 
 async function fillFieldValue(args: {
@@ -480,15 +624,29 @@ async function fillFieldValue(args: {
   field: FillableField;
   value: string;
 }): Promise<FillOperation> {
-  if (shouldCheckField(args.value) && (args.field.inputType === "checkbox" || args.field.inputType === "radio")) {
-    const preparedLocator = await prepareLocatorForInteraction(args.locator).catch(() => args.locator.first());
-    const labelLocator = args.locator.locator("xpath=ancestor::label[1]").first();
-    const preparedLabelLocator = await prepareLocatorForInteraction(labelLocator).catch(() => null);
+  if (
+    shouldCheckField(args.value) &&
+    (args.field.inputType === "checkbox" || args.field.inputType === "radio")
+  ) {
+    const preparedLocator = await prepareLocatorForInteraction(
+      args.locator,
+    ).catch(() => args.locator.first());
+    const labelLocator = args.locator
+      .locator("xpath=ancestor::label[1]")
+      .first();
+    const preparedLabelLocator = await prepareLocatorForInteraction(
+      labelLocator,
+    ).catch(() => null);
 
-    if (args.field.checked || (await readCheckedState(preparedLocator, args.field.inputType).catch(() => false))) {
+    if (
+      args.field.checked ||
+      (await readCheckedState(preparedLocator, args.field.inputType).catch(
+        () => false,
+      ))
+    ) {
       return {
         expectedValue: "checked",
-        mode: "check"
+        mode: "check",
       };
     }
 
@@ -496,45 +654,59 @@ async function fillFieldValue(args: {
       await preparedLabelLocator.click({ force: true }).catch(() => undefined);
     }
 
-    let checkedAfterAttempt = await readCheckedState(preparedLocator, args.field.inputType).catch(() => false);
+    let checkedAfterAttempt = await readCheckedState(
+      preparedLocator,
+      args.field.inputType,
+    ).catch(() => false);
     if (!checkedAfterAttempt) {
       await preparedLocator.check({ force: true }).catch(async () => {
         await preparedLocator.click({ force: true }).catch(() => undefined);
       });
-      checkedAfterAttempt = await readCheckedState(preparedLocator, args.field.inputType).catch(() => false);
+      checkedAfterAttempt = await readCheckedState(
+        preparedLocator,
+        args.field.inputType,
+      ).catch(() => false);
     }
 
     if (!checkedAfterAttempt && preparedLabelLocator) {
       await preparedLabelLocator.click({ force: true }).catch(() => undefined);
-      checkedAfterAttempt = await readCheckedState(preparedLocator, args.field.inputType).catch(() => false);
+      checkedAfterAttempt = await readCheckedState(
+        preparedLocator,
+        args.field.inputType,
+      ).catch(() => false);
     }
 
     if (!checkedAfterAttempt) {
-      await setCheckedStateWithDomFallback(preparedLocator, args.field.inputType).catch(() => undefined);
+      await setCheckedStateWithDomFallback(
+        preparedLocator,
+        args.field.inputType,
+      ).catch(() => undefined);
     }
 
     return {
       expectedValue: "checked",
-      mode: "check"
+      mode: "check",
     };
   }
 
   if (args.field.tag === "select") {
     const preparedLocator = await prepareLocatorForInteraction(args.locator);
     const desired = normalizeText(args.value);
-    const matchedOption = findMatchingSelectOption(args.field.options, [desired]);
+    const matchedOption = findMatchingSelectOption(args.field.options, [
+      desired,
+    ]);
     try {
       await preparedLocator.selectOption({ label: desired });
       return {
         expectedValue: desired,
-        mode: "select"
+        mode: "select",
       };
     } catch {
       if (matchedOption) {
         await preparedLocator.selectOption({ label: matchedOption });
         return {
           expectedValue: matchedOption,
-          mode: "select"
+          mode: "select",
         };
       }
     }
@@ -545,30 +717,48 @@ async function fillFieldValue(args: {
   // Native date/time inputs require .fill() with ISO format — typeLikeHuman types
   // individual characters which the browser's native picker interprets incorrectly
   // (e.g. "1998-04-17" typed char-by-char becomes "12/09/80417").
-  const isNativeDateInput = ["date", "time", "datetime-local", "month", "week"].includes(args.field.inputType);
+  const isNativeDateInput = [
+    "date",
+    "time",
+    "datetime-local",
+    "month",
+    "week",
+  ].includes(args.field.inputType);
   if (isNativeDateInput) {
     const preparedLocator = await prepareLocatorForInteraction(args.locator);
     await preparedLocator.fill(fittedValue);
     return {
       expectedValue: fittedValue,
-      mode: "fill"
+      mode: "fill",
     };
   }
 
   await typeLikeHuman(args.locator, fittedValue);
   return {
     expectedValue: fittedValue,
-    mode: "fill"
+    mode: "fill",
   };
 }
 
-async function triggerLocatorClick(locator: Locator): Promise<string> {
+async function triggerLocatorClick(
+  locator: Locator,
+  options: { singleAttempt?: boolean } = {},
+): Promise<string> {
   const preparedLocator = await prepareLocatorForInteraction(locator);
 
   try {
-    await preparedLocator.click({ timeout: 4000 });
-    return "playwright-click";
-  } catch {
+    await preparedLocator.click({
+      timeout: 4000,
+      ...(options.singleAttempt ? { noWaitAfter: true } : {}),
+    });
+    return options.singleAttempt
+      ? "playwright-click-single-attempt"
+      : "playwright-click";
+  } catch (error) {
+    if (options.singleAttempt) {
+      throw error;
+    }
+
     try {
       await preparedLocator.click({ force: true, timeout: 4000 });
       return "playwright-force-click";
@@ -580,7 +770,11 @@ async function triggerLocatorClick(locator: Locator): Promise<string> {
 
         element.scrollIntoView({ block: "center", inline: "center" });
 
-        if (element instanceof HTMLButtonElement && element.type === "submit" && element.form) {
+        if (
+          element instanceof HTMLButtonElement &&
+          element.type === "submit" &&
+          element.form
+        ) {
           element.form.requestSubmit(element);
           return;
         }
@@ -607,7 +801,12 @@ async function waitForPostActionState(page: Page): Promise<VisibleState> {
   return readVisibleState(page);
 }
 
-export async function executeDecision(page: Page, decision: PlannerDecision, preparedClick?: PreparedClickAction): Promise<{
+export async function executeDecision(
+  page: Page,
+  decision: PlannerDecision,
+  preparedClick?: PreparedClickAction,
+  options: ExecuteDecisionOptions = {},
+): Promise<{
   success: boolean;
   stop?: boolean;
   note: string;
@@ -623,7 +822,13 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
     if (decision.action === "scroll") {
       await page.mouse.wheel(0, 850);
       const after = await readVisibleState(page);
-      return { success: true, note: "Scrolled down page", destinationUrl: after.url, destinationTitle: after.title, visibleTextSnippet: after.textSnippet };
+      return {
+        success: true,
+        note: "Scrolled down page",
+        destinationUrl: after.url,
+        destinationTitle: after.title,
+        visibleTextSnippet: after.textSnippet,
+      };
     }
 
     if (decision.action === "wait") {
@@ -632,7 +837,10 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
       await page.waitForTimeout(1500);
       const after = await readVisibleState(page);
       const elapsedMs = Date.now() - startedAt;
-      const { stateChanged, destinationLabel } = describeStateChange(before, after);
+      const { stateChanged, destinationLabel } = describeStateChange(
+        before,
+        after,
+      );
       return {
         success: true,
         note: stateChanged
@@ -642,17 +850,22 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
         destinationUrl: after.url,
         destinationTitle: after.title,
         stateChanged,
-        visibleTextSnippet: after.textSnippet
+        visibleTextSnippet: after.textSnippet,
       };
     }
 
     if (decision.action === "back") {
       const before = await readVisibleState(page);
       const startedAt = Date.now();
-      await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => undefined);
+      await page
+        .goBack({ waitUntil: "domcontentloaded" })
+        .catch(() => undefined);
       const after = await readVisibleState(page);
       const elapsedMs = Date.now() - startedAt;
-      const { stateChanged, destinationLabel } = describeStateChange(before, after);
+      const { stateChanged, destinationLabel } = describeStateChange(
+        before,
+        after,
+      );
       return {
         success: stateChanged,
         note: stateChanged
@@ -662,7 +875,7 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
         destinationUrl: after.url,
         destinationTitle: after.title,
         stateChanged,
-        visibleTextSnippet: after.textSnippet
+        visibleTextSnippet: after.textSnippet,
       };
     }
 
@@ -673,47 +886,75 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
         note: `Recorded page state at '${normalizeText(after.title) || after.url}' without interaction`,
         destinationUrl: after.url,
         destinationTitle: after.title,
-        visibleTextSnippet: after.textSnippet
+        visibleTextSnippet: after.textSnippet,
       };
     }
 
     if (decision.action === "stop") {
-      return { success: true, stop: true, note: "Planner decided to stop due to friction or completion" };
+      return {
+        success: true,
+        stop: true,
+        note: "Planner decided to stop due to friction or completion",
+      };
     }
 
     const target = resolveDecisionTargetLabel(decision);
     const targetId = decision.target_id.trim();
     if (!target && !targetId) {
-      return { success: false, note: "Decision required a target but did not provide one" };
+      return {
+        success: false,
+        note: "Decision required a target but did not provide one",
+      };
     }
 
     if (decision.action === "click") {
-      const preparedClickResolution = preparedClick ? { preparedClick } : await prepareClickDecision(page, decision);
+      const preparedClickResolution = preparedClick
+        ? { preparedClick }
+        : await prepareClickDecision(page, decision);
       if (!preparedClickResolution.preparedClick) {
         return {
           success: false,
-          note: preparedClickResolution.note ?? `Could not find clickable element for '${target || targetId}'`
+          note:
+            preparedClickResolution.note ??
+            `Could not find clickable element for '${target || targetId}'`,
         };
       }
 
       const before = await readVisibleState(page);
-      const neighborhoodBefore = await captureClickNeighborhood(preparedClickResolution.preparedClick.locator);
+      const neighborhoodBefore = await captureClickNeighborhood(
+        preparedClickResolution.preparedClick.locator,
+      );
       const startedAt = Date.now();
-      const clickStrategy = await triggerLocatorClick(preparedClickResolution.preparedClick.locator);
+      const clickStrategy = await triggerLocatorClick(
+        preparedClickResolution.preparedClick.locator,
+        options.singleClickAttempt ? { singleAttempt: true } : {},
+      );
       let after = await waitForPostActionState(page);
       let elapsedMs = Date.now() - startedAt;
-      let { stateChanged, destinationLabel } = describeStateChange(before, after);
+      let { stateChanged, destinationLabel } = describeStateChange(
+        before,
+        after,
+      );
 
       if (!stateChanged) {
         await page.waitForTimeout(1200);
         after = await readVisibleState(page);
         elapsedMs = Date.now() - startedAt;
-        ({ stateChanged, destinationLabel } = describeStateChange(before, after));
+        ({ stateChanged, destinationLabel } = describeStateChange(
+          before,
+          after,
+        ));
       }
 
       if (!stateChanged) {
-        const neighborhoodAfter = await captureClickNeighborhood(preparedClickResolution.preparedClick.locator);
-        if (neighborhoodBefore && neighborhoodAfter && neighborhoodBefore !== neighborhoodAfter) {
+        const neighborhoodAfter = await captureClickNeighborhood(
+          preparedClickResolution.preparedClick.locator,
+        );
+        if (
+          neighborhoodBefore &&
+          neighborhoodAfter &&
+          neighborhoodBefore !== neighborhoodAfter
+        ) {
           stateChanged = true;
           destinationLabel = normalizeText(after.title) || after.url;
         }
@@ -732,8 +973,11 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
           stateChanged,
           visibleTextSnippet: after.textSnippet,
           ...(preparedClickResolution.preparedClick.clickIndicator
-            ? { clickIndicator: preparedClickResolution.preparedClick.clickIndicator }
-            : {})
+            ? {
+                clickIndicator:
+                  preparedClickResolution.preparedClick.clickIndicator,
+              }
+            : {}),
         };
       }
 
@@ -749,37 +993,55 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
         stateChanged,
         visibleTextSnippet: after.textSnippet,
         ...(preparedClickResolution.preparedClick.clickIndicator
-          ? { clickIndicator: preparedClickResolution.preparedClick.clickIndicator }
-          : {})
+          ? {
+              clickIndicator:
+                preparedClickResolution.preparedClick.clickIndicator,
+            }
+          : {}),
       };
     }
 
     if (decision.action === "type") {
       const fields = await collectVisibleFillableFields(page);
       const matchedField = targetId
-        ? fields.find((field) => field.agentId === targetId) ?? null
+        ? (fields.find((field) => field.agentId === targetId) ?? null)
         : findBestFillableField(fields, target);
 
       if (!matchedField) {
-        return { success: false, note: `Could not find input for '${target || targetId}'` };
+        return {
+          success: false,
+          note: `Could not find input for '${target || targetId}'`,
+        };
       }
 
-      const resolvedField = await resolveFillableFieldLocator(page, matchedField);
+      const resolvedField = await resolveFillableFieldLocator(
+        page,
+        matchedField,
+      );
       const locator = resolvedField.locator;
-      const beforeFieldState = await readFieldRuntimeState(locator, matchedField).catch(() => ({
+      const beforeFieldState = await readFieldRuntimeState(
+        locator,
+        matchedField,
+      ).catch(() => ({
         value: "",
-        checked: matchedField.checked ?? null
+        checked: matchedField.checked ?? null,
       }));
       const operation = await fillFieldValue({
         locator,
         field: matchedField,
-        value: decision.text || ""
+        value: decision.text || "",
       });
-      const afterFieldState = await readFieldRuntimeState(locator, matchedField).catch(() => beforeFieldState);
-      const stateChanged = didFieldStateChange(beforeFieldState, afterFieldState);
+      const afterFieldState = await readFieldRuntimeState(
+        locator,
+        matchedField,
+      ).catch(() => beforeFieldState);
+      const stateChanged = didFieldStateChange(
+        beforeFieldState,
+        afterFieldState,
+      );
       const valueApplied = doesFieldStateMatchExpected({
         after: afterFieldState,
-        operation
+        operation,
       });
       const after = await readVisibleState(page);
 
@@ -791,18 +1053,20 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
           destinationUrl: after.url,
           destinationTitle: after.title,
           stateChanged,
-          visibleTextSnippet: after.textSnippet
+          visibleTextSnippet: after.textSnippet,
         };
       }
 
       return {
         success: true,
-        note: stateChanged ? `Filled '${target || targetId}'` : `Field '${target || targetId}' already held the requested value`,
+        note: stateChanged
+          ? `Filled '${target || targetId}'`
+          : `Field '${target || targetId}' already held the requested value`,
         matchedBy: `target_id:${matchedField.tag}/${matchedField.inputType}:${resolvedField.strategy}`,
         destinationUrl: after.url,
         destinationTitle: after.title,
         stateChanged,
-        visibleTextSnippet: after.textSnippet
+        visibleTextSnippet: after.textSnippet,
       };
     }
 
@@ -810,7 +1074,7 @@ export async function executeDecision(page: Page, decision: PlannerDecision, pre
   } catch (error) {
     return {
       success: false,
-      note: `Action failed: ${cleanErrorMessage(error)}`
+      note: `Action failed: ${cleanErrorMessage(error)}`,
     };
   }
 }

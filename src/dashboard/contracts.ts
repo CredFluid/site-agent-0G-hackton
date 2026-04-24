@@ -7,6 +7,7 @@ import {
   TaskHistoryEntrySchema
 } from "../schemas/types.js";
 import { SubmissionAgentRunSchema } from "../submissions/types.js";
+import { TradeRunOptionsSchema } from "../trade/types.js";
 
 const TenPointNullableScoreSchema = z
   .number()
@@ -26,6 +27,7 @@ export const RunInputsSchema = z.object({
   headed: z.boolean(),
   mobile: z.boolean(),
   ignoreHttpsErrors: z.boolean().optional(),
+  tradeOptions: TradeRunOptionsSchema.optional(),
   llmProvider: z.enum(["openai", "ollama"]).optional(),
   model: z.string().optional(),
   startedAt: z.string().optional(),

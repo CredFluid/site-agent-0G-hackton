@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: site-agent-prod
+    runtime: node
+    plan: starter
+    autoDeployTrigger: commit
+    buildCommand: npm ci && npm run build && npm run browser:install
+    startCommand: npm run render:start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: LLM_PROVIDER
+        value: openai
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SITE_AGENT_DATA_DIR
+        value: /opt/render/project/src/data
+    disk:
+      name: site-agent-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 10

@@ -53,7 +53,7 @@ User submits URL + tasks
 - **Supplemental audits** — SEO crawl, security headers, performance timings, accessibility (axe-core), CRO signals, content readability, mobile layout
 - **Click replay** — animated WebP of before/after screenshots for every click
 - **Dual LLM support** — OpenAI (GPT-5) for production, Ollama for local/private development
-- **Three deployment modes** — CLI, web dashboard, or Netlify serverless
+- **Two deployment modes** — CLI or web dashboard, including Render web service deployment
 
 ---
 
@@ -357,9 +357,11 @@ All settings are read from environment variables (`.env` file).
 
 | Variable | Default | Description |
 |---|---|---|
-| `APP_BASE_URL` | — | Production URL for public report links |
+| `APP_BASE_URL` | — | Production URL for public report links. On Render, `RENDER_EXTERNAL_URL` is used automatically when this is unset. |
+| `SITE_AGENT_DATA_DIR` | — | Root directory for persisted runs and submissions. Set this to your Render disk mount path for durable storage. |
+| `PORT` | `10000` on Render | Public HTTP port for Render web services |
 | `DASHBOARD_PORT` | `4173` | Dashboard server port |
-| `DASHBOARD_HOST` | `127.0.0.1` | Dashboard server host |
+| `DASHBOARD_HOST` | `127.0.0.1` locally, `0.0.0.0` on Render | Dashboard server host |
 | `REPORT_TTL_DAYS` | `30` | Public report link expiry |
 | `INTERNAL_JOB_SECRET` | — | Restrict background job invocation |
 
@@ -393,40 +395,41 @@ Since the agent follows only your tasks, structure them as focused coverage lane
 
 ---
 
-## Netlify Deployment
+## Render Deployment
 
-This repo includes a Netlify-ready runtime:
+This repo now targets a standard Render web service deployment:
 
-- **Synchronous Function** (`src/netlify/functions/app.ts`) — handles all dashboard routes
-- **Background Function** (`src/netlify/functions/process-submission-background.ts`) — long-running audit jobs
-- **Netlify Blobs** — storage for submissions and run artifacts (auto-detected via `SITE_ID` or `URL` env vars)
-- **@sparticuz/chromium** — serverless Chromium (replaces Playwright's browser download)
+- **Dashboard server** (`src/dashboard/server.ts`) — handles the app, submission routes, public reports, and dashboard APIs
+- **Local filesystem persistence** — submissions and run artifacts are stored under `SITE_AGENT_DATA_DIR`
+- **Render Blueprint** (`render.yaml`) — defines the Render web service, health check, and persistent disk mount
+- **Full Playwright runtime** — the build installs Chromium for the dashboard worker process
 
-### Build Configuration (`netlify.toml`)
+### Included `render.yaml`
 
-| Setting | Value |
-|---|---|
-| Build command | `npm run build` |
-| Publish directory | `netlify-static` |
-| Functions directory | `dist/netlify/functions` |
-| Node version | 22 |
-| External modules | `playwright`, `@sparticuz/chromium` |
+The repo root includes a Render Blueprint with:
+
+- `runtime: node`
+- `buildCommand: npm ci && npm run build && npm run browser:install`
+- `startCommand: npm run render:start`
+- `healthCheckPath: /health`
+- a persistent disk mounted at `/opt/render/project/src/data`
 
 ### Required Environment Variables
 
 | Variable | Description |
 |---|---|
-| `OPENAI_API_KEY` | OpenAI API key |
-| `APP_BASE_URL` | Your production site URL |
+| `OPENAI_API_KEY` | OpenAI API key when `LLM_PROVIDER=openai` |
 
-### Optional Environment Variables
+### Recommended Environment Variables
 
 | Variable | Description |
 |---|---|
-| `OPENAI_MODEL` | Defaults to `gpt-5` |
-| `INTERNAL_JOB_SECRET` | Restricts background job invocation via `x-agentprobe-job-secret` header |
+| `LLM_PROVIDER` | Use `openai` for a single-service Render deployment unless you are also hosting Ollama separately |
+| `APP_BASE_URL` | Optional. If unset on Render, the app falls back to `RENDER_EXTERNAL_URL` |
+| `SITE_AGENT_DATA_DIR` | Override only if you change the disk mount path from the default in `render.yaml` |
+| `INTERNAL_JOB_SECRET` | Optional hardening for internal job-style routes |
 
-> **Note:** Serverless mode is auto-detected via `USE_SERVERLESS_CHROMIUM=true`, `NETLIFY_LOCAL=true`, `SITE_ID`, or `URL`. The total run cap is 600 seconds, with part reserved for evaluation and report generation.
+> **Note:** Render web services must bind to `0.0.0.0:$PORT`, and persistent filesystem data survives deploys only when it is written under the attached disk mount path. See the official Render docs for [web services](https://render.com/docs/web-services), [persistent disks](https://render.com/docs/disks), and the [Blueprint spec](https://render.com/docs/blueprint-spec).
 
 ---
 
@@ -438,7 +441,7 @@ High-level summary:
 
 | Layer | Key Files | Purpose |
 |---|---|---|
-| **Entry points** | `cli/run.ts`, `dashboard/server.ts`, `netlify/` | CLI, web UI, serverless |
+| **Entry points** | `cli/run.ts`, `dashboard/server.ts` | CLI and web UI |
 | **Orchestration** | `runAuditJob.ts`, `processSubmissionBatch.ts` | Single-run and multi-agent execution |
 | **Agent loop** | `runner.ts` → `planner.ts` → `executor.ts` | Capture state → LLM plans → Playwright acts |
 | **Page understanding** | `pageState.ts`, `siteBrief.ts`, `taskDirectives.ts` | DOM snapshots, site comprehension, instruction parsing |

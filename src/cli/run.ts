@@ -6,6 +6,8 @@ import { config, resolveLlmRuntime, type LlmProvider } from "../config.js";
 import { buildCustomTaskSuite } from "../core/customTaskSuite.js";
 import { runAuditJob } from "../core/runAuditJob.js";
 import { normalizeCustomTasks, SUBMISSION_TASKS_REQUIRED_MESSAGE } from "../submissions/customTasks.js";
+import { buildDefaultTradeRunOptions } from "../trade/policy.js";
+import { TradeStrategySchema, type TradeStrategy } from "../trade/types.js";
 import { resolveRunDir } from "../utils/files.js";
 import { info } from "../utils/log.js";
 
@@ -38,6 +40,24 @@ function parseLlmProvider(value: string): LlmProvider {
   throw new Error(`Unsupported LLM provider '${value}'. Use 'openai' or 'ollama'.`);
 }
 
+function parseTradeStrategy(value: string): TradeStrategy {
+  const parsed = TradeStrategySchema.safeParse(value.trim());
+  if (!parsed.success) {
+    throw new Error(`Unsupported trade strategy '${value}'. Use 'auto', 'dapp_only', or 'deposit_only'.`);
+  }
+
+  return parsed.data;
+}
+
+function parseOptionalConfirmationCount(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 12) {
+    throw new Error("Trade confirmations must be an integer between 0 and 12.");
+  }
+
+  return parsed;
+}
+
 program
   .name("site-agent-pro")
   .description("Run accepted website tasks like a realistic user and generate an evidence-based task output")
@@ -56,6 +76,10 @@ program
   .option("--signup-url <url>", "Absolute or relative signup URL to use during auth bootstrap")
   .option("--login-url <url>", "Absolute or relative login URL to use during auth bootstrap")
   .option("--access-url <url>", "Absolute or relative protected URL to verify after login")
+  .option("--trade-enabled", "Allow deterministic onchain trade execution for this run")
+  .option("--trade-dry-run", "Validate the extracted trade without broadcasting it")
+  .option("--trade-strategy <strategy>", "Trade strategy: auto, dapp_only, or deposit_only")
+  .option("--trade-confirmations <count>", "Confirmations to wait for before marking a trade confirmed", parseOptionalConfirmationCount)
   .action(async (options: {
     url: string;
     headed?: boolean;
@@ -72,6 +96,10 @@ program
     signupUrl?: string;
     loginUrl?: string;
     accessUrl?: string;
+    tradeEnabled?: boolean;
+    tradeDryRun?: boolean;
+    tradeStrategy?: string;
+    tradeConfirmations?: number;
   }) => {
     const baseUrl = options.url as string;
     const storageStatePath = options.storageState?.trim() ? path.resolve(options.storageState) : undefined;
@@ -100,6 +128,14 @@ program
       ...(options.model?.trim() ? { model: options.model.trim() } : {}),
       ...(options.ollamaBaseUrl?.trim() ? { ollamaBaseUrl: options.ollamaBaseUrl.trim() } : {})
     });
+    const defaultTradeOptions = buildDefaultTradeRunOptions();
+    const tradeOptions = {
+      enabled: Boolean(options.tradeEnabled) || Boolean(options.tradeDryRun) || defaultTradeOptions.enabled,
+      dryRun: Boolean(options.tradeDryRun),
+      strategy: options.tradeStrategy ? parseTradeStrategy(options.tradeStrategy) : defaultTradeOptions.strategy,
+      confirmations:
+        options.tradeConfirmations !== undefined ? options.tradeConfirmations : defaultTradeOptions.confirmations
+    };
 
     info(`Running site agent against ${baseUrl}`);
     info(`Total run budget is capped at ${Math.round(config.maxSessionDurationMs / 1000)} seconds`);
@@ -113,6 +149,11 @@ program
     }
     if (options.ignoreHttpsErrors) {
       info("Ignoring HTTPS certificate errors for this run");
+    }
+    if (tradeOptions.enabled) {
+      info(
+        `Trade execution is enabled${tradeOptions.dryRun ? " in dry-run mode" : ""} using strategy '${tradeOptions.strategy}' with ${tradeOptions.confirmations} confirmation${tradeOptions.confirmations === 1 ? "" : "s"}`
+      );
     }
     if (effectiveStorageStatePath) {
       info(`Loading Playwright storage state from ${summarizeCliPath(effectiveStorageStatePath)}`);
@@ -170,10 +211,12 @@ program
         ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
         storageStatePath: authSessionStatePath,
         saveStorageStatePath: authSessionStatePath,
+        tradeOptions,
         extraInputs: {
           customTasks: acceptedTasks,
           instructionText: acceptedTasks.join("\n"),
           instructionFileName: null,
+          tradeOptions,
           authBootstrapEnabled: true,
           authAccessConfirmed: authResult.accessConfirmed,
           authVerificationMethod: authResult.verificationMethod,
@@ -200,10 +243,12 @@ program
       ignoreHttpsErrors: Boolean(options.ignoreHttpsErrors),
       storageStatePath,
       saveStorageStatePath,
+      tradeOptions,
       extraInputs: {
         customTasks: acceptedTasks,
         instructionText: acceptedTasks.join("\n"),
-        instructionFileName: null
+        instructionFileName: null,
+        tradeOptions
       },
       llmProvider: llmRuntime.provider,
       model: llmRuntime.model,

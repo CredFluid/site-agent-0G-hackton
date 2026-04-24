@@ -224,6 +224,8 @@ function getActionDescription(action: string, target: string): string {
       return "I went back";
     case "extract":
       return "I captured the page state";
+    case "trade":
+      return "I ran the wallet trade handoff";
     case "stop":
       return "I stopped";
     default:

@@ -43,12 +43,12 @@ Site Agent is a **browser automation system** that:
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         ENTRY POINTS                                │
-│  ┌──────────┐  ┌──────────────────┐  ┌───────────────────────────┐  │
-│  │  CLI      │  │  Dashboard Web   │  │  Netlify Serverless       │  │
-│  │ cli/run   │  │  dashboard/      │  │  netlify/functions/       │  │
-│  └─────┬─────┘  └────────┬─────────┘  └────────────┬──────────────┘  │
-│        │                 │                          │                │
-│        └─────────────────┼──────────────────────────┘                │
+│  ┌──────────┐  ┌──────────────────┐                                  │
+│  │  CLI      │  │  Dashboard Web   │                                  │
+│  │ cli/run   │  │  dashboard/      │                                  │
+│  └─────┬─────┘  └────────┬─────────┘                                  │
+│        │                 │                                             │
+│        └─────────────────┘                                             │
 │                          ▼                                          │
 │               ┌─────────────────────┐                               │
 │               │   Submission Queue   │                               │
@@ -97,7 +97,7 @@ Site Agent is a **browser automation system** that:
 
 ## Entry Points
 
-The system has **three ways to start a run**:
+The system has **two ways to start a run**:
 
 ### 1. CLI (`src/cli/run.ts`)
 
@@ -119,11 +119,11 @@ npx site-agent-pro --url https://example.com --task "Click the pricing tab"
 - Serves reports at `/r/<token>` and `/reports/<runId>`
 - REST API at `/api/runs` and `/api/runs/<id>`
 
-### 3. Netlify Serverless (`src/netlify/`)
+### Render Deployment
 
-- Deploys as Netlify Functions for cloud hosting
-- Same core logic, using `@sparticuz/chromium` for serverless browser
-- Netlify-specific dashboard and storage adapters
+- The same dashboard server is the Render entrypoint
+- Render runs the Node HTTP server directly instead of serverless handlers
+- Run artifacts and submissions are stored on a mounted persistent disk via `SITE_AGENT_DATA_DIR`
 
 ---
 
@@ -471,8 +471,7 @@ queued → running → completed
 | Mode | Entry | Browser | Storage |
 |---|---|---|---|
 | **CLI** | `cli/run.ts` | System Playwright Chromium | Local filesystem |
-| **Dashboard** | `dashboard/server.ts` | System Playwright Chromium | Local `data/` directory |
-| **Netlify** | `netlify/functions/` | `@sparticuz/chromium` (serverless) | Netlify Blobs |
+| **Dashboard / Render** | `dashboard/server.ts` | System Playwright Chromium | Local filesystem or Render persistent disk |
 
 ---
 
@@ -546,12 +545,6 @@ src/
 │   ├── dashboardData.ts    #   Run summary/detail builders
 │   ├── runRepository.ts    #   File-based run storage
 │   └── runArtifacts.ts     #   Artifact file handling
-│
-├── netlify/                # Serverless deployment
-│   ├── app.ts              #   Netlify app config
-│   ├── dashboard.ts        #   Netlify dashboard adapter
-│   ├── storage.ts          #   Netlify Blobs storage
-│   └── functions/          #   Lambda function handlers
 │
 ├── utils/                  # Shared utilities
 │   ├── files.ts            #   File I/O helpers

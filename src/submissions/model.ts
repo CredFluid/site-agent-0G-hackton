@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import { config } from "../config.js";
+import { buildDefaultTradeRunOptions } from "../trade/policy.js";
+import type { TradeRunOptions } from "../trade/types.js";
 import { type Submission, SubmissionSchema, type SubmissionAgentRun } from "./types.js";
 import { buildInitialAgentRuns } from "../core/agentProfiles.js";
 import { buildCustomTaskSuite } from "../core/customTaskSuite.js";
@@ -21,6 +23,7 @@ export function createSubmissionRecord(args: {
   ignoreHttpsErrors?: boolean;
   agentCount?: number;
   agentRuns?: SubmissionAgentRun[];
+  tradeOptions?: TradeRunOptions;
   customTasks?: string[];
   instructionText?: string;
   instructionFileName?: string | null;
@@ -50,6 +53,10 @@ export function createSubmissionRecord(args: {
     headed: Boolean(args.headed),
     mobile: Boolean(args.mobile),
     ignoreHttpsErrors: Boolean(args.ignoreHttpsErrors),
+    tradeOptions: {
+      ...buildDefaultTradeRunOptions(),
+      ...(args.tradeOptions ?? {})
+    },
     customTasks,
     instructionText: args.instructionText?.trim() || customTasks.join("\n"),
     instructionFileName: args.instructionFileName?.trim() || null,

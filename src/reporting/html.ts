@@ -75,6 +75,8 @@ function describeAction(entry: TaskHistoryEntry): string {
       return "Went back one page";
     case "extract":
       return "Captured a page snapshot";
+    case "trade":
+      return "Executed the wallet trade handoff";
     case "stop":
       return "Stopped the path";
     default:

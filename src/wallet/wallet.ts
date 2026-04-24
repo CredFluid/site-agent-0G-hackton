@@ -59,6 +59,7 @@ export type WalletConfig = {
 
 type EthersWallet = {
   address: string;
+  populateTransaction: (tx: Record<string, unknown>) => Promise<Record<string, unknown>>;
   signTransaction: (tx: Record<string, unknown>) => Promise<string>;
   signMessage: (message: string | Uint8Array) => Promise<string>;
   signTypedData: (
@@ -168,6 +169,11 @@ export async function getWalletAddress(): Promise<string> {
   return wallet.address;
 }
 
+export async function getWalletProvider(): Promise<unknown> {
+  const wallet = await resolveWallet();
+  return wallet.provider;
+}
+
 export async function signTransaction(tx: Record<string, unknown>): Promise<string> {
   const wallet = await resolveWallet();
   return wallet.signTransaction(tx);
@@ -193,7 +199,8 @@ export async function signTypedData(
  */
 export async function sendTransaction(tx: Record<string, unknown>): Promise<string> {
   const wallet = await resolveWallet();
-  const signed = await wallet.signTransaction(tx);
+  const populated = await wallet.populateTransaction(tx);
+  const signed = await wallet.signTransaction(populated);
   const provider = wallet.provider as { send: (method: string, params: unknown[]) => Promise<string> };
   return provider.send("eth_sendRawTransaction", [signed]);
 }

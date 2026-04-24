@@ -118,6 +118,7 @@ export async function processSubmissionBatch(args: {
           headed: currentSubmission.headed,
           mobile: currentSubmission.mobile,
           ignoreHttpsErrors: currentSubmission.ignoreHttpsErrors,
+          tradeOptions: currentSubmission.tradeOptions,
           extraInputs: {
             source: args.source,
             submissionId: currentSubmission.id,
@@ -132,7 +133,8 @@ export async function processSubmissionBatch(args: {
             agentLabel: variant.label,
             agentProfileLabel: variant.profileLabel,
             personaVariantKey: variant.personaVariantKey,
-            customTasks: currentSubmission.customTasks
+            customTasks: currentSubmission.customTasks,
+            tradeOptions: currentSubmission.tradeOptions
           }
         });
 

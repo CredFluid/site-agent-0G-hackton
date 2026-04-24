@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getPreferredAccessIdentity } from "../auth/profile.js";
 import { generateStructured, type LlmRuntimeOptions } from "../llm/client.js";
-import { isWalletConfigured, getWalletAddress } from "../wallet/wallet.js";
+import { isWalletConfigured, getWalletAddress, getWalletChainId } from "../wallet/wallet.js";
 import { BROWSER_AGENT_PROMPT } from "../prompts/browserAgent.js";
 import {
   scoreFormFieldTargetMatch,
@@ -19,6 +19,9 @@ import {
   textHasInstructionCue,
   textHasOutcomeCue
 } from "./taskHeuristics.js";
+import { buildDefaultTradeRunOptions } from "../trade/policy.js";
+import { pageLooksTradeReady, taskLooksLikeTrade } from "../trade/extractor.js";
+import type { TradeRunOptions } from "../trade/types.js";
 import {
   PlannerDecisionSchema,
   type PageState,
@@ -57,6 +60,10 @@ const ACCOUNT_CREATION_LOCAL_ONLY_PATTERN =
   /\b(?:browser fallback|browser storage only|using browser storage only|local server is unavailable|api is unavailable)\b/i;
 const ACCOUNT_CREATION_VERIFICATION_PENDING_PATTERN =
   /\b(?:please\s+verify|verify\s+your\s+email|check\s+your\s+email|send\s+otp|enter\s+(?:the\s+)?(?:code|otp)|verification\s+code|resend\s*\(\d+\s*s\))\b/i;
+const WALLET_CONNECTION_PENDING_PATTERN =
+  /\b(?:connecting|check\s+(?:your\s+)?wallet|confirm\s+(?:in|with)\s+(?:wallet|metamask)|open\s+metamask|awaiting\s+wallet|waiting\s+for\s+wallet|wallet\s+connection\s+pending)\b/i;
+const TRANSIENT_STATUS_LABEL_PATTERN =
+  /^(?:connecting|loading|submitting|processing|working|authorizing|signing|verifying|sending|pending|syncing|please wait)$/i;
 
 const PlannerInputSchema = z.object({
   persona: z.object({
@@ -108,7 +115,9 @@ const PlannerInputSchema = z.object({
     postalCode: z.string(),
     country: z.string(),
     company: z.string(),
-    walletAddress: z.string().default("")
+    walletAddress: z.string().default(""),
+    walletChainId: z.number().int().positive().nullable().default(null),
+    tradeEnabled: z.boolean().default(false)
   }),
   pageState: z.object({
     title: z.string(),
@@ -202,6 +211,10 @@ function normalizeInteractiveIntentLabel(value: string): string {
     .replace(/[^a-z0-9\s]+/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isTransientStatusLabel(value: string): boolean {
+  return TRANSIENT_STATUS_LABEL_PATTERN.test(normalizeInteractiveIntentLabel(value));
 }
 
 function countSharedKeywords(left: string, right: string): number {
@@ -368,6 +381,10 @@ function enforceLoopAvoidance(args: {
   return args.decision;
 }
 
+function historyHasAnyTradeAttempt(history: TaskHistoryEntry[]): boolean {
+  return history.some((entry) => entry.decision.action === "trade");
+}
+
 function directiveTargetsMatch(left: string, right: string): boolean {
   const normalizedLeft = normalizeKey(left);
   const normalizedRight = normalizeKey(right);
@@ -395,7 +412,7 @@ function directiveTargetsMatch(left: string, right: string): boolean {
 
 function scoreInteractiveForDirectiveTarget(item: PageState["interactive"][number], target: string): number {
   const label = getInteractiveLabel(item);
-  if (!label || item.disabled) {
+  if (!label || item.disabled || isTransientStatusLabel(label)) {
     return Number.NEGATIVE_INFINITY;
   }
 
@@ -472,6 +489,15 @@ function pageShowsAccountCreationVerificationPending(pageState: PageState): bool
 function pageShowsAccountCreationLocalOnlyFallback(pageState: PageState): boolean {
   const blob = normalizeTaskText([pageState.title, pageState.visibleText, ...pageState.headings].join(" "));
   return ACCOUNT_CREATION_LOCAL_ONLY_PATTERN.test(blob);
+}
+
+function pageShowsPendingWalletConnection(pageState: PageState): boolean {
+  if (pageLooksTradeReady(pageState)) {
+    return false;
+  }
+
+  const blob = normalizeTaskText([pageState.title, pageState.visibleText, ...pageState.headings].join(" "));
+  return WALLET_CONNECTION_PENDING_PATTERN.test(blob);
 }
 
 function findBestSubmitControl(pageState: PageState): PageState["interactive"][number] | null {
@@ -591,7 +617,7 @@ function isInteractiveLine(pageState: PageState, line: string): boolean {
   const normalizedLine = normalizeKey(line);
   return pageState.interactive.some((item) => {
     const label = normalizeKey(getInteractiveLabel(item));
-    return Boolean(label) && label === normalizedLine;
+    return Boolean(label) && label === normalizedLine && !isTransientStatusLabel(label);
   });
 }
 
@@ -683,6 +709,71 @@ function findMatchingFormField(pageState: PageState, instructionQuote: string): 
 
 function inferFormFieldValue(field: PageState["formFields"][number], url?: string): string | null {
   return inferProfileFormFieldValue(field, getPreferredAccessIdentity(url));
+}
+
+function extractCompactAmountTask(taskGoal: string): { action: "buy" | "sell" | "swap"; amount: string } | null {
+  const match = normalizeLineText(taskGoal).match(/^(buy|sell|swap)\s+([0-9]+(?:\.[0-9]+)?)$/i);
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+
+  const action = match[1].toLowerCase();
+  if (action !== "buy" && action !== "sell" && action !== "swap") {
+    return null;
+  }
+
+  return {
+    action,
+    amount: match[2]
+  };
+}
+
+function extractLiteralFieldEntryTask(taskGoal: string): { value: string; target: string } | null {
+  const normalized = normalizeLineText(taskGoal).replace(/^step\s+\d+[:.)-]?\s*/i, "");
+  const match = normalized.match(
+    /^(?:enter|type|fill|input|provide)\s+["'“]?(.+?)["'”]?\s+in\s+(?:the\s+)?(.+?)(?:\s+(?:field|box|input|textbox|text box|value|details?))?$/i
+  );
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+
+  const value = normalizeLineText(match[1]);
+  const target = cleanInstructionTarget(match[2]);
+  if (!value || !target) {
+    return null;
+  }
+
+  return { value, target };
+}
+
+function findTradeAmountField(pageState: PageState): PageState["formFields"][number] | null {
+  const ranked = pageState.formFields
+    .map((field) => {
+      const key = normalizeKey([field.label, field.placeholder, field.name, field.id].join(" "));
+      let score = scoreFormFieldTargetMatch(field, "amount");
+      if (/\bamount\b/.test(key)) {
+        score += 120;
+      }
+      if (/\b(?:qty|quantity|size|value)\b/.test(key)) {
+        score += 40;
+      }
+      if (/\b(?:slippage|gas|recipient|address|token|contract)\b/.test(key)) {
+        score -= 80;
+      }
+
+      return { field, score };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  return ranked[0]?.field ?? null;
+}
+
+function findExplicitEntryField(pageState: PageState, target: string): PageState["formFields"][number] | null {
+  return (
+    findMatchingFormField(pageState, target) ??
+    (/\b(?:amount|qty|quantity|size|value)\b/i.test(target) ? findTradeAmountField(pageState) : null)
+  );
 }
 
 function resolveFormFieldTarget(field: PageState["formFields"][number]): string {
@@ -946,6 +1037,7 @@ function enforceOrderedTaskDirectives(args: {
   decision: PlannerDecision;
 }): PlannerDecision {
   const directives = parseTaskDirectives(args.task.goal);
+  const literalFieldEntryTask = extractLiteralFieldEntryTask(args.task.goal);
   if (directives.length === 0) {
     return args.decision;
   }
@@ -958,6 +1050,20 @@ function enforceOrderedTaskDirectives(args: {
 
       const matchingControl = findBestDirectiveInteractiveMatch(args.pageState, directive.target);
       if (!matchingControl) {
+        if (pageShowsPendingWalletConnection(args.pageState)) {
+          return {
+            thought: `The next literal instruction is to click '${directive.target}', but the wallet connection flow is still visibly in progress on this page.`,
+            stepNumber: null,
+            instructionQuote: "",
+            action: "wait",
+            target_id: "",
+            target: "",
+            text: "",
+            expectation: `Wait for the pending wallet connection state to finish so '${directive.target}' can become visible before continuing.`,
+            friction: "low"
+          };
+        }
+
         return buildStopDecision({
           thought: `The next literal user instruction is to click '${directive.target}', but no visible control clearly matches that target on the current page.`,
           expectation: `Stop instead of exploring unrelated controls before '${directive.target}' is visible or unambiguous.`
@@ -978,7 +1084,11 @@ function enforceOrderedTaskDirectives(args: {
     }
 
     if (directive.action === "type_field") {
-      const field = findMatchingFormField(args.pageState, directive.target);
+      const explicitValue =
+        literalFieldEntryTask && normalizeKey(directive.target).includes(normalizeKey(literalFieldEntryTask.target))
+          ? literalFieldEntryTask.value
+          : null;
+      const field = findExplicitEntryField(args.pageState, explicitValue ? literalFieldEntryTask!.target : directive.target);
       if (!field) {
         continue;
       }
@@ -987,7 +1097,7 @@ function enforceOrderedTaskDirectives(args: {
         continue;
       }
 
-      const value = inferFormFieldValue(field, args.pageState.url);
+      const value = explicitValue ?? inferFormFieldValue(field, args.pageState.url);
       if (!value) {
         return buildStopDecision({
           thought: `The next literal user instruction is to fill '${directive.target}', but there is no safe inferred value for that visible field.`,
@@ -1160,6 +1270,7 @@ function buildFallbackDecision(args: {
   taskIndex: number;
   pageState: PageState;
   history: TaskHistoryEntry[];
+  tradeOptions: TradeRunOptions;
 }): PlannerDecision {
   const task = args.suite.tasks[args.taskIndex] ?? args.suite.tasks[0];
   if (!task) {
@@ -1197,6 +1308,80 @@ function buildFallbackDecision(args: {
       expectation: "Stop and report the pending verification state instead of navigating away or claiming signup success.",
       friction: "medium"
     });
+  }
+
+  const compactAmountTask = extractCompactAmountTask(task.goal);
+  if (compactAmountTask) {
+    const amountField = findTradeAmountField(args.pageState);
+    if (!amountField) {
+      return buildStopDecision({
+        thought: `The accepted task is to ${compactAmountTask.action} '${compactAmountTask.amount}', but no visible amount field is present on the current page.`,
+        expectation: "Stop instead of revisiting earlier controls or guessing a different trade step before the amount input is visible.",
+        friction: "high"
+      });
+    }
+
+    if (normalizeKey(amountField.value || "") === normalizeKey(compactAmountTask.amount)) {
+      return buildStopDecision({
+        thought: `The visible amount field already contains '${compactAmountTask.amount}', so this amount-entry task is complete.`,
+        expectation: "Stop this task and continue to the next accepted step instead of clicking around the trade form.",
+        friction: "low"
+      });
+    }
+
+    const stepReference = findFormFieldStepReference({
+      pageState: args.pageState,
+      field: amountField
+    });
+
+    return {
+      thought: `The accepted task explicitly requests a ${compactAmountTask.action} amount of '${compactAmountTask.amount}', so the visible amount field must be filled before any later trade action.`,
+      stepNumber: stepReference.stepNumber,
+      instructionQuote: stepReference.instructionQuote,
+      action: "type",
+      target_id: amountField.agentId,
+      target: resolveFormFieldTarget(amountField),
+      text: compactAmountTask.amount,
+      expectation: `Fill '${resolveFormFieldTarget(amountField)}' with '${compactAmountTask.amount}' and wait for the form state to update before any later trade action.`,
+      friction: "medium"
+    };
+  }
+
+  const literalFieldEntryTask = extractLiteralFieldEntryTask(task.goal);
+  if (literalFieldEntryTask) {
+    const field = findExplicitEntryField(args.pageState, literalFieldEntryTask.target);
+    if (!field) {
+      return buildStopDecision({
+        thought: `The accepted task is to enter '${literalFieldEntryTask.value}' in '${literalFieldEntryTask.target}', but that field is not visible on the current page yet.`,
+        expectation: "Stop instead of guessing a different field before the named input is visible.",
+        friction: "high"
+      });
+    }
+
+    if (normalizeKey(field.value || "") === normalizeKey(literalFieldEntryTask.value)) {
+      return buildStopDecision({
+        thought: `The visible '${resolveFormFieldTarget(field)}' field already contains '${literalFieldEntryTask.value}', so this entry task is complete.`,
+        expectation: "Stop this task and continue to the next accepted step instead of typing the same value again.",
+        friction: "low"
+      });
+    }
+
+    const stepReference = findFormFieldStepReference({
+      pageState: args.pageState,
+      field
+    });
+
+    return {
+      thought: `The accepted task explicitly says to enter '${literalFieldEntryTask.value}' in '${literalFieldEntryTask.target}', so that named field should be filled directly before any later trade action.`,
+      stepNumber: stepReference.stepNumber,
+      instructionQuote: stepReference.instructionQuote,
+      action: "type",
+      target_id: field.agentId,
+      target: resolveFormFieldTarget(field),
+      text: literalFieldEntryTask.value,
+      expectation: `Fill '${resolveFormFieldTarget(field)}' with '${literalFieldEntryTask.value}' and wait for the form state to update before any later action.`,
+      friction: "medium"
+    };
   }
 
   const pendingField = findFirstPendingFormField(args.pageState);
@@ -1269,6 +1454,26 @@ function buildFallbackDecision(args: {
         friction: "medium"
       };
     }
+  }
+
+  if (
+    args.tradeOptions.enabled &&
+    taskLooksLikeTrade(task.goal) &&
+    pageLooksTradeReady(args.pageState) &&
+    !historyHasAnyTradeAttempt(args.history)
+  ) {
+    return {
+      thought:
+        "Model planning was unavailable, but the accepted task is a crypto sell or transfer flow and the page visibly exposes a deterministic wallet handoff target.",
+      stepNumber: null,
+      instructionQuote: "",
+      action: "trade",
+      target_id: "",
+      target: "",
+      text: "",
+      expectation: "Extract the visible trade instruction and hand it to the deterministic wallet executor once.",
+      friction: "medium"
+    };
   }
 
   const pageEvidenceText = normalizeTaskText([args.pageState.title, args.pageState.visibleText, ...args.pageState.headings].join(" "));
@@ -1490,6 +1695,36 @@ export type PlannerResolution = {
   fallbackReason?: string;
 };
 
+function usesSelfHostedPlannerRuntime(llm?: LlmRuntimeOptions): boolean {
+  const provider = llm?.provider ?? (process.env.LLM_PROVIDER?.trim().toLowerCase() === "ollama" ? "ollama" : "openai");
+  if (provider === "ollama") {
+    return true;
+  }
+
+  const openaiBaseUrl = process.env.OPENAI_BASE_URL?.trim();
+  if (!openaiBaseUrl) {
+    return false;
+  }
+
+  return !/^https:\/\/api\.openai\.com\/?v1\/?$/i.test(openaiBaseUrl);
+}
+
+function resolvePlannerRequestOptions(llm?: LlmRuntimeOptions): { timeoutMs: number; maxRetries: number } {
+  // Retries are useful for hosted models, but on local/self-hosted runtimes they can
+  // consume most of the run budget without yielding a better plan.
+  if (usesSelfHostedPlannerRuntime(llm)) {
+    return {
+      timeoutMs: PLANNER_TIMEOUT_MS,
+      maxRetries: 0
+    };
+  }
+
+  return {
+    timeoutMs: PLANNER_TIMEOUT_MS,
+    maxRetries: PLANNER_MAX_RETRIES
+  };
+}
+
 function enforceOtpTriggerPrioritization(args: {
   pageState: PageState;
   history: TaskHistoryEntry[];
@@ -1555,6 +1790,15 @@ function finalizePlannerDecision(args: {
   history: TaskHistoryEntry[];
   decision: PlannerDecision;
 }): PlannerDecision {
+  const singleTradeEnforcedDecision =
+    args.decision.action === "trade" && historyHasAnyTradeAttempt(args.history)
+      ? buildStopDecision({
+          thought:
+            "A trade handoff was already attempted for this task, so another onchain send would risk a duplicate transfer.",
+          expectation: "Stop instead of repeating a trade handoff on the same task."
+        })
+      : args.decision;
+
   return enforceLoopAvoidance({
     history: args.history,
     decision: enforceTargetIdDecision({
@@ -1572,7 +1816,7 @@ function finalizePlannerDecision(args: {
             history: args.history,
             decision: enrichDecisionTarget({
               pageState: args.pageState,
-              decision: args.decision
+              decision: singleTradeEnforcedDecision
             })
           })
         })
@@ -1588,15 +1832,21 @@ export async function decideNextAction(args: {
   pageState: PageState;
   history: TaskHistoryEntry[];
   remainingSeconds?: number;
+  tradeOptions?: TradeRunOptions;
   llm?: LlmRuntimeOptions;
 }): Promise<PlannerResolution> {
   const task = args.suite.tasks[args.taskIndex] ?? args.suite.tasks[0]!;
+  const plannerRequestOptions = resolvePlannerRequestOptions(args.llm);
   const orderedSteps = parseTaskDirectives(task.goal);
   const orderedStepNotes = buildTaskDirectiveSummary(task.goal);
   const hasUnstructuredSteps = orderedSteps.some((directive) => directive.action === "unstructured");
   const orderedStepConfidence = orderedSteps.length === 0 ? "none" : hasUnstructuredSteps ? "low" : "high";
   const accessProfile = getPreferredAccessIdentity(args.pageState.url);
   const walletAddress = isWalletConfigured() ? await getWalletAddress().catch(() => "") : "";
+  const tradeOptions = {
+    ...buildDefaultTradeRunOptions(),
+    ...(args.tradeOptions ?? {})
+  };
   const payload = PlannerInputSchema.parse({
     persona: args.suite.persona,
     task: {
@@ -1613,7 +1863,9 @@ export async function decideNextAction(args: {
     siteBrief: args.siteBrief,
     accessProfile: {
       ...accessProfile,
-      walletAddress
+      walletAddress,
+      walletChainId: isWalletConfigured() ? getWalletChainId() : null,
+      tradeEnabled: tradeOptions.enabled
     },
     pageState: args.pageState,
     ...(args.remainingSeconds !== undefined ? { remainingSeconds: args.remainingSeconds } : {}),
@@ -1654,8 +1906,8 @@ export async function decideNextAction(args: {
       userPayload: payload,
       schemaName: "planner_decision",
       schema: PlannerDecisionSchema,
-      timeoutMs: PLANNER_TIMEOUT_MS,
-      maxRetries: PLANNER_MAX_RETRIES
+      timeoutMs: plannerRequestOptions.timeoutMs,
+      maxRetries: plannerRequestOptions.maxRetries
     });
 
     return {
@@ -1676,7 +1928,8 @@ export async function decideNextAction(args: {
           suite: args.suite,
           taskIndex: args.taskIndex,
           pageState: args.pageState,
-          history: args.history
+          history: args.history,
+          tradeOptions
         })
       }),
       fallbackReason: cleanErrorMessage(error)

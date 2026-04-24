@@ -1,5 +1,6 @@
 import { processSubmissionBatch } from "../core/processSubmissionBatch.js";
 import { createSubmissionRecord, listSubmissions, readSubmission, writeSubmission } from "./store.js";
+import type { TradeRunOptions } from "../trade/types.js";
 import type { Submission } from "./types.js";
 
 export class SubmissionService {
@@ -11,6 +12,7 @@ export class SubmissionService {
     headed?: boolean;
     mobile?: boolean;
     ignoreHttpsErrors?: boolean;
+    tradeOptions?: TradeRunOptions;
     agentCount?: number;
     customTasks?: string[];
     instructionText?: string;

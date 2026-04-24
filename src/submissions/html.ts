@@ -1,5 +1,7 @@
 import { config } from "../config.js";
 import { DASHBOARD_HEAD_TAGS } from "../dashboard/theme.js";
+import { buildDefaultTradeRunOptions } from "../trade/policy.js";
+import { TradeRunOptionsSchema, type TradeRunOptions } from "../trade/types.js";
 import { isExpired } from "./model.js";
 import { DEFAULT_SUBMISSION_TARGET_MODE, type SubmissionTargetMode } from "./publicUrl.js";
 import type { Submission } from "./types.js";
@@ -130,6 +132,12 @@ function basePage(args: { body: string; title: string }): string {
         border: 1px solid var(--line);
         padding: 0.92rem 1rem;
         font: inherit;
+      }
+
+      input[type="checkbox"],
+      input[type="radio"] {
+        width: auto;
+        padding: 0;
       }
 
       input, select, textarea {
@@ -331,6 +339,22 @@ function basePage(args: { body: string; title: string }): string {
         background: rgba(0, 212, 170, 0.1);
       }
 
+      .toggle-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0.66rem 0.85rem;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--ink);
+        font-size: 0.84rem;
+      }
+
+      .toggle-chip input {
+        accent-color: var(--accent);
+      }
+
       .launch-note {
         margin: 0.9rem 0 0;
         padding-top: 0.9rem;
@@ -496,10 +520,15 @@ export function renderLandingPage(args: {
   submittedUrl?: string;
   selectedAgentCount?: number;
   submittedInstructions?: string;
+  tradeOptions?: Partial<TradeRunOptions>;
   allowPrivateTargets?: boolean;
   selectedTargetMode?: SubmissionTargetMode;
 }): string {
   const selectedAgentCount = Math.min(5, Math.max(1, Math.round(args.selectedAgentCount ?? 1)));
+  const selectedTradeOptions = TradeRunOptionsSchema.parse({
+    ...buildDefaultTradeRunOptions(),
+    ...(args.tradeOptions ?? {})
+  });
   const allowPrivateTargets = Boolean(args.allowPrivateTargets);
   const selectedTargetMode =
     allowPrivateTargets && args.selectedTargetMode === "localhost"
@@ -589,10 +618,39 @@ export function renderLandingPage(args: {
                       .map((count) => `<option value="${count}" ${selectedAgentCount === count ? "selected" : ""}>${count} agent${count === 1 ? "" : "s"}</option>`)
                       .join("")}
                   </select>
+                  <label class="toggle-chip">
+                    <input type="checkbox" name="trade_enabled" ${selectedTradeOptions.enabled ? "checked" : ""} />
+                    <span>Enable onchain execution</span>
+                  </label>
+                  <label class="toggle-chip">
+                    <input type="checkbox" name="trade_dry_run" ${selectedTradeOptions.dryRun ? "checked" : ""} />
+                    <span>Dry run</span>
+                  </label>
+                  <select class="config-select" name="trade_strategy">
+                    ${[
+                      ["auto", "trade: auto"],
+                      ["deposit_only", "trade: deposit only"],
+                      ["dapp_only", "trade: dapp only"]
+                    ]
+                      .map(
+                        ([value, label]) =>
+                          `<option value="${value}" ${selectedTradeOptions.strategy === value ? "selected" : ""}>${label}</option>`
+                      )
+                      .join("")}
+                  </select>
+                  <select class="config-select" name="trade_confirmations">
+                    ${[0, 1, 2, 3]
+                      .map(
+                        (count) =>
+                          `<option value="${count}" ${selectedTradeOptions.confirmations === count ? "selected" : ""}>${count} conf${count === 1 ? "" : "s"}</option>`
+                      )
+                      .join("")}
+                  </select>
                   <span class="tag on">tabs and links</span>
                   <span class="tag on">mobile notes</span>
                   <span class="tag on">honest feedback</span>
                 </div>
+                <p class="scope-note">Wallet secrets stay in <code>.env</code>. These controls only decide whether this run may use the configured wallet and whether it should broadcast or stay in dry-run mode.</p>
               </form>
               <p class="launch-note">${launchNote}</p>
               <div class="link-row">

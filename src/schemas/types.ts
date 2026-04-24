@@ -20,6 +20,7 @@ export const ActionTypeSchema = z.enum([
   "wait",
   "back",
   "extract",
+  "trade",
   "stop"
 ]);
 

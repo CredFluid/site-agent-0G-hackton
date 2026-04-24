@@ -7,6 +7,7 @@ import { runTaskSuite } from "./runner.js";
 import { generateClickReplay } from "../reporting/clickReplay.js";
 import { renderHtmlReport } from "../reporting/html.js";
 import { renderMarkdownReport } from "../reporting/markdown.js";
+import type { TradeRunOptions } from "../trade/types.js";
 import { ensureDir, resolveRunDir, writeJson, writeText } from "../utils/files.js";
 
 function summarizeSessionPath(filePath: string): string {
@@ -27,6 +28,7 @@ export async function runAuditJob(options: {
   storageStatePath?: string | undefined;
   saveStorageStatePath?: string | undefined;
   maxSessionDurationMs?: number;
+  tradeOptions?: TradeRunOptions;
   llmProvider?: LlmProvider;
   model?: string;
   ollamaBaseUrl?: string;
@@ -90,6 +92,7 @@ export async function runAuditJob(options: {
       synchronizedTimezone: config.deviceTimezone,
       customTasks: suite.tasks.map((task) => task.goal),
       accessIdentityName,
+      ...(options.tradeOptions ? { tradeOptions: options.tradeOptions } : {}),
       ...(options.extraInputs ?? {})
     };
 
@@ -105,6 +108,7 @@ export async function runAuditJob(options: {
       storageStatePath,
       saveStorageStatePath,
       maxSessionDurationMs: browserExecutionBudgetMs,
+      ...(options.tradeOptions ? { tradeOptions: options.tradeOptions } : {}),
       provider: llmRuntime.provider,
       model: llmRuntime.model,
       ollamaBaseUrl: llmRuntime.ollamaBaseUrl

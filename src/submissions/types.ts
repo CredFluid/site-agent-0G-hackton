@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TradeRunOptionsSchema } from "../trade/types.js";
 
 export const SubmissionStatusSchema = z.enum(["queued", "running", "completed", "failed"]);
 
@@ -46,6 +47,12 @@ export const SubmissionSchema = z.object({
   headed: z.boolean(),
   mobile: z.boolean(),
   ignoreHttpsErrors: z.boolean(),
+  tradeOptions: TradeRunOptionsSchema.default({
+    enabled: false,
+    dryRun: false,
+    strategy: "auto",
+    confirmations: 1
+  }),
   customTasks: z.array(z.string().min(1)).max(12).default([]),
   instructionText: z.string().default(""),
   instructionFileName: z.string().nullable().default(null),

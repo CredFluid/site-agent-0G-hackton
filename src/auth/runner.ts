@@ -238,7 +238,7 @@ type ServerlessChromiumModule = {
 };
 
 function shouldUseServerlessChromium(): boolean {
-  return process.env.USE_SERVERLESS_CHROMIUM === "true" || process.env.NETLIFY === "true";
+  return process.env.USE_SERVERLESS_CHROMIUM === "true";
 }
 
 async function resolveLaunchOptions(options: { headed: boolean | undefined }): Promise<LaunchOptions> {

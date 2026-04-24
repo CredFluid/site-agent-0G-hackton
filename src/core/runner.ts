@@ -17,6 +17,7 @@ import { clampRunDurationMs, config } from "../config.js";
 import {
   isWalletConfigured,
   getWalletConfig,
+  getWalletChainId,
   getMetaMaskExtensionPath,
   getMetaMaskUserDataDir
 } from "../wallet/wallet.js";
@@ -31,6 +32,7 @@ import { isGameplayTask, summarizeGameplayHistory } from "./gameplaySummary.js";
 import { deriveSiteBrief } from "./siteBrief.js";
 import { runSiteChecks } from "./siteChecks.js";
 import type { LlmRuntimeOptions } from "../llm/client.js";
+import { parseTaskDirectives } from "./taskDirectives.js";
 import {
   classifyTaskText,
   hasTaskKeywordEvidence,
@@ -43,8 +45,12 @@ import { ensureDir, writeJson } from "../utils/files.js";
 import { debug, warn } from "../utils/log.js";
 import { installPlaywrightPageCompat } from "../utils/playwrightCompat.js";
 import { sleep } from "../utils/time.js";
+import { extractSellInstruction } from "../trade/extractor.js";
+import { executeTradeInstruction } from "../trade/engine.js";
+import { getTradePolicy, buildDefaultTradeRunOptions } from "../trade/policy.js";
 import type {
   PageState,
+  PlannerDecision,
   SiteBrief,
   SiteChecks,
   TaskHistoryEntry,
@@ -62,6 +68,12 @@ export type RunOptions = {
   storageStatePath?: string | undefined;
   saveStorageStatePath?: string | undefined;
   maxSessionDurationMs?: number;
+  tradeOptions?: {
+    enabled?: boolean;
+    dryRun?: boolean;
+    strategy?: "auto" | "dapp_only" | "deposit_only";
+    confirmations?: number;
+  };
 } & LlmRuntimeOptions;
 
 const INTERSTITIAL_PATTERNS = [
@@ -104,6 +116,10 @@ const OTP_FIELD_PATTERN =
   /\b(?:otp|one[- ]?time|verification|passcode|security\s*code|auth\s*code|enter\s*code)\b/i;
 const WALLET_PENDING_PATTERN =
   /\b(?:requesting\s+account|check\s+(?:your\s+)?wallet|confirm\s+(?:in|with)\s+metamask|confirm\s+in\s+your\s+wallet|open\s+metamask|awaiting\s+wallet|signature\s+request|approval\s+pending|waiting\s+for\s+wallet)\b/i;
+const WALLET_CONNECT_TARGET_PATTERN = /\bconnect\b.*\bwallet\b|\bwallet\b.*\bconnect\b/i;
+const WALLET_CONNECT_SURFACE_PATTERN =
+  /\b(?:connect(?:\s+your)?\s+wallet|select(?:\s+a)?\s+wallet|choose(?:\s+a)?\s+wallet|walletconnect|connect with metamask|wallet connection)\b/i;
+const WALLET_CONNECT_PROVIDER_PATTERN = /\b(?:wallet|metamask|walletconnect|coinbase|phantom|rabby|rainbow|web3|ethereum)\b/i;
 const OTP_VERIFY_SUBMIT_LABELS = [
   "verify",
   "confirm",
@@ -118,6 +134,9 @@ const OTP_VERIFY_SUBMIT_LABELS = [
   "sign up",
   "signup"
 ];
+const CONTINUATION_FLOW_PATTERN =
+  /\b(?:wallet|metamask|popup|pop up|modal|dialog|signature|sign(?:ing)?|approve|approval|accept|confirm|execute|transaction|buy|sell|swap|deposit|withdraw|send|transfer|amount|qty|quantity|price|token|network|chain|checkout|cart|order|review|payment)\b/i;
+const DIRECT_CONTINUATION_VERB_PATTERN = /^(?:accept|approve|confirm|sign|execute|submit|continue|next|finish|complete|review)\b/i;
 
 type ServerlessChromiumModule = {
   args: string[];
@@ -131,19 +150,12 @@ type ServerlessChromiumModule = {
 };
 
 function shouldUseServerlessChromium(): boolean {
-  const useServerless =
-    process.env.USE_SERVERLESS_CHROMIUM === "true" ||
-    process.env.NETLIFY_LOCAL === "true" ||
-    Boolean(process.env.SITE_ID) ||
-    Boolean(process.env.URL);
+  const useServerless = process.env.USE_SERVERLESS_CHROMIUM === "true";
 
   debug("chromium mode", {
     useServerless,
     USE_SERVERLESS_CHROMIUM: process.env.USE_SERVERLESS_CHROMIUM,
-    NETLIFY: process.env.NETLIFY,
-    NETLIFY_LOCAL: process.env.NETLIFY_LOCAL,
-    SITE_ID: process.env.SITE_ID,
-    URL: process.env.URL
+    RENDER: process.env.RENDER
   });
 
   return useServerless;
@@ -225,6 +237,231 @@ function taskAllowsAutoAuth(taskGoal: string): boolean {
 
 function normalizeVisibleText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function countWords(value: string): number {
+  return normalizeVisibleText(value)
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function extractCompactAmountTaskValue(taskGoal: string): string | null {
+  const match = normalizeVisibleText(taskGoal).match(/^(?:buy|sell|swap)\s+([0-9]+(?:\.[0-9]+)?)$/i);
+  return match?.[1] ?? null;
+}
+
+function compactTargetsMatch(left: string, right: string): boolean {
+  const normalizedLeft = normalizeVisibleText(left).toLowerCase();
+  const normalizedRight = normalizeVisibleText(right).toLowerCase();
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  if (normalizedLeft === normalizedRight || normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)) {
+    return true;
+  }
+
+  const leftWords = normalizedLeft.split(/\s+/).filter(Boolean);
+  const rightWords = normalizedRight.split(/\s+/).filter(Boolean);
+  const sharedWordCount = leftWords.filter((word) => rightWords.includes(word)).length;
+  return sharedWordCount >= Math.min(leftWords.length, rightWords.length) || sharedWordCount >= 2;
+}
+
+function taskShouldEndAfterSuccessfulCompactStep(taskGoal: string, history: TaskHistoryEntry[]): boolean {
+  const amountValue = extractCompactAmountTaskValue(taskGoal);
+  if (amountValue) {
+    return history.some(
+      (entry) =>
+        entry.result.success &&
+        entry.decision.action === "type" &&
+        compactTargetsMatch(entry.decision.target || entry.decision.instructionQuote || "", "amount")
+    );
+  }
+
+  const directives = parseTaskDirectives(taskGoal).filter((directive) => directive.action !== "stop");
+  if (directives.length !== 1) {
+    return false;
+  }
+
+  const [directive] = directives;
+  if (!directive || directive.action === "unstructured" || directive.action === "fill_visible_form") {
+    return false;
+  }
+
+  if (directive.action === "click") {
+    return history.some(
+      (entry) =>
+        entry.result.success &&
+        entry.decision.action === "click" &&
+        compactTargetsMatch(entry.decision.target || entry.decision.instructionQuote || "", directive.target)
+    );
+  }
+
+  if (directive.action === "type_field") {
+    return history.some(
+      (entry) =>
+        entry.result.success &&
+        entry.decision.action === "type" &&
+        compactTargetsMatch(entry.decision.target || entry.decision.instructionQuote || "", directive.target)
+    );
+  }
+
+  if (directive.action === "submit") {
+    return history.some(
+      (entry) =>
+        entry.result.success &&
+        entry.decision.action === "click" &&
+        /^(?:submit|continue|next|finish|complete|done|send|verify|sign ?up|register|join|execute real transaction)$/i.test(
+          normalizeVisibleText(entry.decision.target || entry.decision.instructionQuote || "")
+        )
+    );
+  }
+
+  return false;
+}
+
+function taskLooksLikeCompactActionFlowStep(taskGoal: string): boolean {
+  const normalized = normalizeVisibleText(taskGoal);
+  if (!normalized || countWords(normalized) > 8) {
+    return false;
+  }
+
+  if (extractCompactAmountTaskValue(normalized)) {
+    return true;
+  }
+
+  const directives = parseTaskDirectives(normalized).filter((directive) => directive.action !== "stop");
+  if (directives.length === 0 || directives.length > 2) {
+    return false;
+  }
+
+  return directives.every((directive) => directive.action !== "unstructured");
+}
+
+function taskNeedsContinuousContext(taskGoal: string): boolean {
+  const normalized = normalizeVisibleText(taskGoal).toLowerCase();
+  return DIRECT_CONTINUATION_VERB_PATTERN.test(normalized) || CONTINUATION_FLOW_PATTERN.test(normalized);
+}
+
+function historyShowsMeaningfulProgress(history: TaskHistoryEntry[]): boolean {
+  return history.some(
+    (entry) =>
+      entry.result.success &&
+      (entry.result.stateChanged !== false ||
+        Boolean(entry.result.destinationUrl) ||
+        Boolean(entry.result.destinationTitle) ||
+        Boolean(entry.result.visibleTextSnippet))
+  );
+}
+
+function shouldContinueFromCurrentPage(args: {
+  previousTask: TaskSuite["tasks"][number] | undefined;
+  currentTask: TaskSuite["tasks"][number];
+  previousHistory: TaskHistoryEntry[];
+}): boolean {
+  if (!args.previousTask || !historyShowsMeaningfulProgress(args.previousHistory)) {
+    return false;
+  }
+
+  if (
+    !taskLooksLikeCompactActionFlowStep(args.previousTask.goal) ||
+    !taskLooksLikeCompactActionFlowStep(args.currentTask.goal)
+  ) {
+    return false;
+  }
+
+  if (taskNeedsContinuousContext(args.previousTask.goal) || taskNeedsContinuousContext(args.currentTask.goal)) {
+    return true;
+  }
+
+  const previousDirectives = parseTaskDirectives(args.previousTask.goal);
+  const currentDirectives = parseTaskDirectives(args.currentTask.goal);
+  const previousLastDirective = previousDirectives[previousDirectives.length - 1];
+  const currentFirstDirective = currentDirectives[0];
+  if (!previousLastDirective || !currentFirstDirective) {
+    return false;
+  }
+
+  if (previousLastDirective.action !== "click" || currentFirstDirective.action !== "click") {
+    return false;
+  }
+
+  const previousTarget = normalizeVisibleText(previousLastDirective.target || "");
+  const currentTarget = normalizeVisibleText(currentFirstDirective.target || "");
+  return /\b(?:connect|wallet)\b/i.test(previousTarget) && /\b(?:wallet|buy|sell|swap|review|confirm|approve|sign)\b/i.test(currentTarget);
+}
+
+function findInteractiveLabelByTargetId(pageState: PageState, targetId: string): string {
+  const normalizedTargetId = normalizeVisibleText(targetId);
+  if (!normalizedTargetId) {
+    return "";
+  }
+
+  return normalizeVisibleText(pageState.interactive.find((item) => item.agentId === normalizedTargetId)?.text || "");
+}
+
+function textLooksLikeWalletConnect(source: string): boolean {
+  const normalizedSource = normalizeVisibleText(source);
+  if (!normalizedSource) {
+    return false;
+  }
+
+  if (WALLET_CONNECT_TARGET_PATTERN.test(normalizedSource) || WALLET_CONNECT_SURFACE_PATTERN.test(normalizedSource)) {
+    return true;
+  }
+
+  return /\bconnect\b/i.test(normalizedSource) && WALLET_CONNECT_PROVIDER_PATTERN.test(normalizedSource);
+}
+
+async function readLocatorWalletConnectContext(locator: Locator): Promise<string> {
+  const context = await locator
+    .evaluate((element) => {
+      const htmlElement = element as HTMLElement;
+      const closestContainer =
+        htmlElement.closest("dialog, [role='dialog'], form, section, article, main, nav, aside, header, div") || htmlElement.parentElement;
+      const containerText = closestContainer?.textContent || "";
+      const href = element instanceof HTMLAnchorElement ? element.href : "";
+      const className = typeof htmlElement.className === "string" ? htmlElement.className : "";
+      return [
+        htmlElement.innerText || htmlElement.textContent || "",
+        element.getAttribute("aria-label") || "",
+        element.getAttribute("title") || "",
+        element.getAttribute("name") || "",
+        element.getAttribute("id") || "",
+        element.getAttribute("data-testid") || "",
+        element.getAttribute("data-test") || "",
+        className,
+        href,
+        containerText.slice(0, 300)
+      ]
+        .join(" ")
+        .trim();
+    })
+    .catch(() => "");
+
+  return normalizeVisibleText(context);
+}
+
+async function decisionLooksLikeWalletConnect(args: {
+  pageState: PageState;
+  decision: PlannerDecision;
+  locator?: Locator;
+}): Promise<boolean> {
+  if (args.decision.action !== "click") {
+    return false;
+  }
+
+  const labels = [
+    normalizeVisibleText(args.decision.target || ""),
+    normalizeVisibleText(args.decision.instructionQuote || ""),
+    findInteractiveLabelByTargetId(args.pageState, args.decision.target_id || "")
+  ];
+
+  if (args.locator) {
+    labels.push(await readLocatorWalletConnectContext(args.locator));
+  }
+
+  return labels.some((label) => textLooksLikeWalletConnect(label));
 }
 
 type ActiveTaskRef = {
@@ -1126,6 +1363,24 @@ function inferTaskStatus(
   task: TaskSuite["tasks"][number],
   taskNotes: string[] = []
 ): { status: TaskRunResult["status"]; reason: string } {
+  const successfulTrades = history.filter((entry) => entry.decision.action === "trade" && entry.result.success);
+  if (successfulTrades.length > 0) {
+    const lastSuccessfulTrade = successfulTrades[successfulTrades.length - 1]!;
+    const note = lastSuccessfulTrade.result.note;
+    return {
+      status: /\bdry run\b/i.test(note) ? "partial_success" : "success",
+      reason: note
+    };
+  }
+
+  const failedTrades = history.filter((entry) => entry.decision.action === "trade" && !entry.result.success);
+  if (failedTrades.length > 0) {
+    return {
+      status: "failed",
+      reason: failedTrades[0]!.result.note
+    };
+  }
+
   const taskProfile = classifyTaskText(task.goal);
   const taskStrings = collectTaskStrings(history, finalUrl, finalTitle, taskNotes);
   const taskEvidenceBlob = taskStrings.join(" ");
@@ -1475,6 +1730,77 @@ function inferTaskStatus(
   };
 }
 
+async function executeTradeHandoff(args: {
+  pageState: PageState;
+  taskName: string;
+  taskGoal: string;
+  runDir: string;
+  tradeOptions: NonNullable<RunOptions["tradeOptions"]>;
+  rawEvents: unknown[];
+}): Promise<{
+  success: boolean;
+  note: string;
+  stop?: boolean;
+  stateChanged?: boolean;
+}> {
+  const instruction = extractSellInstruction({
+    pageState: args.pageState,
+    taskGoal: args.taskGoal,
+    defaultChainId: getWalletChainId()
+  });
+
+  if (!instruction) {
+    args.rawEvents.push({
+      type: "trade_instruction_missing",
+      time: new Date().toISOString(),
+      task: args.taskName,
+      url: args.pageState.url,
+      note: "Trade handoff was requested, but a deterministic sell instruction could not be extracted from the visible page."
+    });
+    return {
+      success: false,
+      note: "Trade handoff could not extract a deterministic recipient address, amount, token, and chain from the visible page."
+    };
+  }
+
+  args.rawEvents.push({
+    type: "trade_instruction_extracted",
+    time: new Date().toISOString(),
+    task: args.taskName,
+    url: args.pageState.url,
+    instruction
+  });
+
+  const record = await executeTradeInstruction({
+    runDir: args.runDir,
+    instruction,
+    runOptions: {
+      ...buildDefaultTradeRunOptions(),
+      ...args.tradeOptions
+    },
+    policy: getTradePolicy(),
+    source: "browser"
+  });
+
+  args.rawEvents.push({
+    type: "trade_execution_result",
+    time: new Date().toISOString(),
+    task: args.taskName,
+    url: args.pageState.url,
+    status: record.status,
+    selectedMode: record.selectedMode,
+    txHash: record.txHash,
+    validation: record.validation,
+    note: record.note
+  });
+
+  return {
+    success: record.status === "dry_run" || record.status === "broadcast" || record.status === "confirmed",
+    note: record.note,
+    stateChanged: record.status === "broadcast" || record.status === "confirmed"
+  };
+}
+
 function buildPageSignature(pageState: PageState): string {
   const interactiveSummary = pageState.interactive
     .slice(0, 8)
@@ -1584,6 +1910,10 @@ export async function runTaskSuite(options: RunOptions): Promise<{
     ...(options.model ? { model: options.model } : {}),
     ...(options.ollamaBaseUrl ? { ollamaBaseUrl: options.ollamaBaseUrl } : {})
   };
+  const tradeOptions = {
+    ...buildDefaultTradeRunOptions(),
+    ...(options.tradeOptions ?? {})
+  };
   const executionBudgetMs = clampRunDurationMs(options.maxSessionDurationMs ?? config.maxSessionDurationMs);
   const executionBudgetSeconds = Math.round(executionBudgetMs / 1000);
   const sessionDeadline = Date.now() + executionBudgetMs;
@@ -1638,6 +1968,13 @@ export async function runTaskSuite(options: RunOptions): Promise<{
     history: TaskHistoryEntry[];
     step: number;
   } | null = null;
+  let walletConnectAttempt:
+    | {
+        taskName: string;
+        step: number;
+        target: string;
+      }
+    | null = null;
   let siteBrief: SiteBrief | null = null;
   let siteChecks: SiteChecks = {
     generatedAt: new Date().toISOString(),
@@ -1816,6 +2153,14 @@ export async function runTaskSuite(options: RunOptions): Promise<{
       note: `Browser execution budget is capped at ${executionBudgetSeconds} seconds for this run.`
     });
     rawEvents.push({
+      type: "trade_configuration",
+      time: new Date().toISOString(),
+      tradeOptions,
+      note: tradeOptions.enabled
+        ? `Deterministic trade execution is enabled for this run${tradeOptions.dryRun ? " in dry-run mode" : ""}.`
+        : "Deterministic trade execution is disabled for this run."
+    });
+    rawEvents.push({
       type: "timezone_sync",
       time: new Date().toISOString(),
       deviceTimezone: config.deviceTimezone,
@@ -1914,16 +2259,38 @@ export async function runTaskSuite(options: RunOptions): Promise<{
         step: 0
       };
 
-      const resetNavigation = await navigateToBaseUrl({
-        page,
-        baseUrl: options.baseUrl,
-        rawEvents,
-        phase: "task_reset",
-        taskName: task.name,
-        taskNotes
-      });
-      if (resetNavigation.success) {
+      const previousTask = index > 0 ? options.suite.tasks[index - 1] : undefined;
+      const previousHistory = taskResults[taskResults.length - 1]?.history ?? [];
+      const continueFromCurrentPage =
+        !isBrowserErrorPage(page.url()) &&
+        shouldContinueFromCurrentPage({
+          previousTask,
+          currentTask: task,
+          previousHistory
+        });
+
+      if (continueFromCurrentPage) {
+        rawEvents.push({
+          type: "task_continuation",
+          time: new Date().toISOString(),
+          task: task.name,
+          url: page.url(),
+          note: `Continuing '${task.name}' from the current page because it appears to be the next compact step in the same flow rather than an independent resettable task.`
+        });
+        taskNotes.push("This task continued from the previous task's final page state because the submitted steps appeared to form one compact flow.");
         await sleep(config.actionDelayMs);
+      } else {
+        const resetNavigation = await navigateToBaseUrl({
+          page,
+          baseUrl: options.baseUrl,
+          rawEvents,
+          phase: "task_reset",
+          taskName: task.name,
+          taskNotes
+        });
+        if (resetNavigation.success) {
+          await sleep(config.actionDelayMs);
+        }
       }
 
       for (let step = 1; step <= perTaskStepCap; step += 1) {
@@ -2076,10 +2443,11 @@ export async function runTaskSuite(options: RunOptions): Promise<{
                 evidence: []
               },
               pageState,
-              history,
-              remainingSeconds: Math.max(1, Math.floor((sessionDeadline - Date.now()) / 1000)),
-              llm
-            });
+            history,
+            remainingSeconds: Math.max(1, Math.floor((sessionDeadline - Date.now()) / 1000)),
+            tradeOptions,
+            llm
+          });
         let decision = planning.decision;
 
         if (planning.fallbackReason) {
@@ -2127,10 +2495,55 @@ export async function runTaskSuite(options: RunOptions): Promise<{
           };
         }
 
-        const preparedClickResolution =
+        let preparedClickResolution =
           !shouldStop && decision.action === "click"
             ? await prepareClickDecision(page, decision)
             : null;
+        const walletConnectClickDetected =
+          !shouldStop && decision.action === "click"
+            ? await decisionLooksLikeWalletConnect({
+                pageState,
+                decision,
+                ...(preparedClickResolution?.preparedClick?.locator
+                  ? { locator: preparedClickResolution.preparedClick.locator }
+                  : {})
+              })
+            : false;
+
+        if (!shouldStop && walletConnectClickDetected && walletConnectAttempt) {
+          rawEvents.push({
+            type: "wallet_connect_repeat_prevented",
+            time: new Date().toISOString(),
+            task: task.name,
+            step: activeStep,
+            url: pageState.url,
+            note: `Skipped a repeated wallet-connect click because '${walletConnectAttempt.target}' was already clicked during '${walletConnectAttempt.taskName}' step ${walletConnectAttempt.step}.`
+          });
+          decision = {
+            thought:
+              metaMaskFlowLooksPending
+                ? "A Connect Wallet click already happened earlier in this run, so wait for that wallet flow to resolve instead of clicking the trigger again."
+                : "Connect Wallet was already clicked once, and there is no wallet popup or page transition currently in flight, so stop instead of waiting on the same unchanged step.",
+            stepNumber: decision.stepNumber,
+            instructionQuote: decision.instructionQuote,
+            action: metaMaskFlowLooksPending ? "wait" : "stop",
+            target_id: "",
+            target: "",
+            text: "",
+            expectation: metaMaskFlowLooksPending
+              ? "The existing wallet connection flow should complete or expose a clearer next step without opening duplicate requests."
+              : "Stop this task and report that the single allowed wallet-connect click did not lead to a visible wallet flow or page change.",
+            friction: metaMaskFlowLooksPending ? "low" : "high"
+          };
+          preparedClickResolution = null;
+        } else if (walletConnectClickDetected && preparedClickResolution?.preparedClick && !walletConnectAttempt) {
+          walletConnectAttempt = {
+            taskName: task.name,
+            step: activeStep,
+            target: (await readLocatorLabel(preparedClickResolution.preparedClick.locator)) || decision.target || "Connect Wallet"
+          };
+        }
+
         const beforeScreenshotPath =
           decision.action === "click"
             ? await captureInteractionScreenshot({
@@ -2149,12 +2562,23 @@ export async function runTaskSuite(options: RunOptions): Promise<{
               stop: true,
               note: "Stopped after repeated unchanged page states with no meaningful progress even after extended follow-up attempts."
             }
+          : decision.action === "trade"
+            ? await executeTradeHandoff({
+                pageState,
+                taskName: task.name,
+                taskGoal: task.goal,
+                runDir: options.runDir,
+                tradeOptions,
+                rawEvents
+              })
           : decision.action === "click" && preparedClickResolution && !preparedClickResolution.preparedClick
             ? {
                 success: false,
                 note: preparedClickResolution.note ?? `Could not find clickable element for '${decision.target.trim()}'`
               }
-            : await executeDecision(page, decision, preparedClickResolution?.preparedClick);
+            : await executeDecision(page, decision, preparedClickResolution?.preparedClick, {
+                singleClickAttempt: walletConnectClickDetected
+              });
         const afterScreenshotPath =
           decision.action === "click"
             ? await captureInteractionScreenshot({
@@ -2224,6 +2648,18 @@ export async function runTaskSuite(options: RunOptions): Promise<{
             history[history.length - 1]!.result = result;
             break;
           }
+        }
+
+        if (result.success && taskShouldEndAfterSuccessfulCompactStep(task.goal, history)) {
+          rawEvents.push({
+            type: "compact_task_completed",
+            time: new Date().toISOString(),
+            task: task.name,
+            step: activeStep,
+            url: page.url(),
+            note: `Completed the explicit compact task '${task.goal}' and will continue to the next accepted task instead of exploring additional controls in the same view.`
+          });
+          break;
         }
 
         if (shouldPauseAfterStep({

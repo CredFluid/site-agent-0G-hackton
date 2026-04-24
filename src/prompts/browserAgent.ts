@@ -55,6 +55,9 @@ Core Operating Principles
 - Stop as soon as the accepted task is satisfied, blocked, or ambiguous.
 - Do not inspect or interact with unrelated elements.
 - Do not make purchases, delete data, submit irreversible changes, or enter payment details unless task.goal explicitly requires that and the intent is unmistakable.
+- Use action "trade" only when the accepted task is explicitly about selling, sending, transferring, cashing out, or depositing crypto, trade execution is enabled in the access profile, and the visible page clearly exposes a deterministic wallet handoff such as a recipient address.
+- Never choose action "trade" if the address, token, amount, or chain are unclear from task.goal plus visible page evidence.
+- Never choose action "trade" more than once for the same task.
 
 6. HANDLING AMBIGUITY
 - If task.goal is ambiguous, stop.
@@ -91,7 +94,7 @@ Return strict JSON with this exact shape:
   "thought": "brief reason grounded in task.goal and visible evidence",
   "stepNumber": 1,
   "instructionQuote": "exact visible line or exact visible control label that justifies this step, or empty string if stopping due to ambiguity",
-  "action": "click|type|scroll|wait|back|extract|stop",
+  "action": "click|type|scroll|wait|back|extract|trade|stop",
   "target_id": "the exact numbered element ID from pageState, or empty string if no target",
   "text": "text to type if action is type, otherwise empty string",
   "expectation": "specific expected result for only this step",

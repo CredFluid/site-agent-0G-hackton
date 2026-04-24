@@ -10,6 +10,8 @@ import {
 import { artifactContentType, isAllowedDashboardArtifact, isImageArtifact } from "../backend/runArtifacts.js";
 import { createLocalRunRepository } from "../backend/runRepository.js";
 import { config } from "../config.js";
+import { buildDefaultTradeRunOptions } from "../trade/policy.js";
+import { TradeStrategySchema } from "../trade/types.js";
 import { readUtf8 } from "../utils/files.js";
 import { info, warn } from "../utils/log.js";
 import {
@@ -32,10 +34,20 @@ const CLIENT_ENTRY = path.join(DASHBOARD_SRC_DIR, "client.ts");
 const NARRATIVE_ENTRY = path.join(DASHBOARD_SRC_DIR, "narrative.ts");
 const DEFAULT_PORT = 4173;
 const DEFAULT_HOST = "127.0.0.1";
+const RENDER_HOST = "0.0.0.0";
 
 function parsePort(value: string | undefined): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : DEFAULT_PORT;
+}
+
+function resolveDashboardHost(): string {
+  const configuredHost = process.env.DASHBOARD_HOST?.trim();
+  if (configuredHost) {
+    return configuredHost;
+  }
+
+  return process.env.RENDER === "true" ? RENDER_HOST : DEFAULT_HOST;
 }
 
 function transpileDashboardModule(entryPath: string): string {
@@ -143,9 +155,25 @@ async function handleRequest(
     const selectedTargetMode = parseSubmissionTargetMode(form.get("target"));
     const submittedInstructions = await readSubmittedInstructionSource(form);
     const requestedAgentCount = Number(form.get("agents") ?? "1");
+    const requestedTradeEnabled = form.has("trade_enabled");
+    const requestedTradeDryRun = form.has("trade_dry_run");
+    const requestedTradeStrategy = typeof form.get("trade_strategy") === "string" ? String(form.get("trade_strategy")) : "";
+    const requestedTradeConfirmations = Number(form.get("trade_confirmations") ?? "");
     const normalizedAgentCount = Number.isFinite(requestedAgentCount)
       ? Math.min(5, Math.max(1, Math.round(requestedAgentCount)))
       : 1;
+    const defaultTradeOptions = buildDefaultTradeRunOptions();
+    const normalizedTradeOptions = {
+      enabled: requestedTradeEnabled || requestedTradeDryRun || defaultTradeOptions.enabled,
+      dryRun: requestedTradeDryRun,
+      strategy: TradeStrategySchema.safeParse(requestedTradeStrategy).success
+        ? TradeStrategySchema.parse(requestedTradeStrategy)
+        : defaultTradeOptions.strategy,
+      confirmations:
+        Number.isInteger(requestedTradeConfirmations) && requestedTradeConfirmations >= 0 && requestedTradeConfirmations <= 12
+          ? requestedTradeConfirmations
+          : defaultTradeOptions.confirmations
+    };
     const urlValidation = validateSubmissionUrl(urlInput, {
       allowPrivateHosts: true,
       targetMode: selectedTargetMode
@@ -165,6 +193,7 @@ async function handleRequest(
           submittedUrl: urlInput,
           selectedAgentCount: normalizedAgentCount,
           submittedInstructions: submittedInstructions.instructionText,
+          tradeOptions: normalizedTradeOptions,
           allowPrivateTargets: true,
           selectedTargetMode
         }),
@@ -176,6 +205,7 @@ async function handleRequest(
     const submission = await args.submissionService.createSubmission({
       url: urlValidation.normalizedUrl ?? urlInput.trim(),
       agentCount: normalizedAgentCount,
+      tradeOptions: normalizedTradeOptions,
       customTasks: submittedInstructions.customTasks,
       instructionText: submittedInstructions.instructionText,
       instructionFileName: submittedInstructions.instructionFileName
@@ -187,6 +217,11 @@ async function handleRequest(
 
   if (req.method !== "GET") {
     sendText(res, 405, "Method not allowed", "text/plain");
+    return;
+  }
+
+  if (requestUrl.pathname === "/health") {
+    sendJson(res, { ok: true, service: "site-agent-dashboard" });
     return;
   }
 
@@ -373,8 +408,8 @@ async function handleRequest(
   sendText(res, 404, "Not found", "text/plain");
 }
 
-const port = parsePort(process.env.DASHBOARD_PORT);
-const host = process.env.DASHBOARD_HOST || DEFAULT_HOST;
+const port = parsePort(process.env.PORT ?? process.env.DASHBOARD_PORT);
+const host = resolveDashboardHost();
 const appBaseUrl = config.appBaseUrl || `http://${host === DEFAULT_HOST ? "localhost" : host}:${port}`;
 const submissionService = new SubmissionService();
 const runRepository = createLocalRunRepository();

@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+const DEFAULT_RENDER_DATA_ROOT = "/opt/render/project/src/data";
+
 export function ensureDir(dirPath: string): void {
   fs.mkdirSync(dirPath, { recursive: true });
 }
@@ -25,13 +27,12 @@ function resolveDataRoot(): string {
     return configuredRoot;
   }
 
-  if (process.env.NETLIFY) {
-    const tempRoot = path.join(os.tmpdir(), "site-agent-pro");
-    ensureDir(tempRoot);
-    return tempRoot;
+  if (process.env.RENDER === "true") {
+    ensureDir(DEFAULT_RENDER_DATA_ROOT);
+    return DEFAULT_RENDER_DATA_ROOT;
   }
 
-  // In serverless environments like AWS Lambda, cwd starts with /var/task which is read-only
+  // Some serverless runtimes expose a read-only working tree.
   if (process.cwd().startsWith('/var/task')) {
     const tempRoot = path.join(os.tmpdir(), "site-agent-pro");
     ensureDir(tempRoot);
