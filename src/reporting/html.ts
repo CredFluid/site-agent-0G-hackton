@@ -726,9 +726,9 @@ export function renderHtmlReport(args: HtmlReportArgs): string {
         args.clickReplayArtifact
           ? `
             <section class="section">
-              <h2>Click Replay</h2>
+              <h2>Activity Replay</h2>
               <div class="summary-card" style="padding: 0; overflow: hidden; background: #000; display: flex; justify-content: center; align-items: center; min-height: 400px; border: 1px solid var(--border2);">
-                <img src="${args.clickReplayArtifact}" alt="Click Replay" style="max-width: 100%; max-height: 720px; display: block;" />
+                <img src="${args.clickReplayArtifact}" alt="Activity replay" style="max-width: 100%; max-height: 720px; display: block;" />
               </div>
               <p class="meta-label" style="margin-top: 0.8rem; text-align: center;">Animated replay of actions captured during this run.</p>
             </section>

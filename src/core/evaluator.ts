@@ -150,7 +150,13 @@ function summarizeRawEvent(event: unknown): string | null {
   if (type === "console") {
     const level = typeof record.level === "string" ? record.level : "";
     const text = typeof record.text === "string" ? normalizeText(record.text) : "";
-    return /error|warn/i.test(level) && text ? `Console ${level}: ${text}` : null;
+    if (!text) {
+      return null;
+    }
+
+    const monitoringSignalPattern =
+      /\b(?:event|analytics|log|monitor|amount|wallet|bank|account|copy|transfer|crypto|naira|payout|payment|displayed|initiated|triggered)\b/i;
+    return /error|warn/i.test(level) || monitoringSignalPattern.test(text) ? `Console ${level}: ${text}` : null;
   }
 
   if (["navigation_error", "session_timeout", "planner_fallback", "runner_error", "storage_state_load", "storage_state_save_error"].includes(type)) {

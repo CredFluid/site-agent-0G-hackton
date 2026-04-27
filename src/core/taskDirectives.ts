@@ -2,7 +2,7 @@ import { normalizeTaskText } from "./taskHeuristics.js";
 
 export type TaskDirective =
   | { action: "click"; raw: string; target: string }
-  | { action: "type_field"; raw: string; target: string }
+  | { action: "type_field"; raw: string; target: string; value?: string }
   | { action: "fill_visible_form"; raw: string; target: "" }
   | { action: "submit"; raw: string; target: "" }
   | { action: "scroll"; raw: string; target: "" }
@@ -12,7 +12,7 @@ export type TaskDirective =
   | { action: "unstructured"; raw: string; target: string };
 
 const ACTION_WORD_PATTERN =
-  "(?:click|tap|press|open|select|choose|fill(?:\\s+(?:out|up|in))?|enter|type|input|provide|submit|create|register|sign\\s*up|signup|join|scroll|swipe|wait|pause|hold|go back|back|stop|halt)";
+  "(?:click|tap|press|open|select|choose|copy|fill(?:\\s+(?:out|up|in))?|enter|type|input|provide|submit|create|register|sign\\s*up|signup|join|scroll|swipe|wait|pause|hold|go back|back|stop|halt)";
 
 function cleanDirectiveText(value: string): string {
   return normalizeTaskText(value.replace(/^["'`]+|["'`]+$/g, "").replace(/[.?!,]+$/g, ""));
@@ -30,7 +30,8 @@ function cleanDirectiveTarget(value: string): string {
 
 function splitDirectiveSegments(taskText: string): string[] {
   const normalized = normalizeTaskText(taskText)
-    .replace(new RegExp(`\\b(?:and then|then|after that|afterwards|next)\\b`, "gi"), "; ")
+    .replace(new RegExp(`\\b(?:and then|then|after that|afterwards)\\b`, "gi"), "; ")
+    .replace(new RegExp(`\\bnext\\b(?=\\s*${ACTION_WORD_PATTERN}\\b)`, "gi"), "; ")
     .replace(new RegExp(`\\band\\b(?=\\s*${ACTION_WORD_PATTERN}\\b)`, "gi"), "; ")
     .replace(new RegExp(`,(?=\\s*${ACTION_WORD_PATTERN}\\b)`, "gi"), "; ");
 
@@ -92,6 +93,83 @@ function isCompleteVisibleFormInstruction(segment: string): boolean {
   );
 }
 
+function extractCompactExchangeAmountDirective(raw: string): TaskDirective | null {
+  const match = raw.match(
+    /^(buy|sell)(?:\s+me)?(?:\s+(?:crypto|cypto|coin|token))?(?:\s+worth)?\s+([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z₦]+)?$/i
+  );
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+
+  const action = match[1].toLowerCase();
+  const unit = (match[3] ?? "").toLowerCase();
+  const target = action === "buy" || /\b(?:ngn|naira|₦)\b/i.test(unit) ? "Naira amount" : "crypto amount";
+
+  return {
+    action: "type_field",
+    raw,
+    target,
+    value: match[2]
+  };
+}
+
+function extractExplicitFieldValueDirective(raw: string): TaskDirective | null {
+  const intoMatch = raw.match(
+    /^(?:fill(?:\s+(?:out|up|in))?|enter|type|input|provide)\s+["'“]?(.+?)["'”]?\s+(?:into|in)\s+(?:the\s+|your\s+)?(.+?)(?:\s+(?:field|box|input|textbox|text box|value|details?))?$/i
+  );
+  if (intoMatch?.[1] && intoMatch[2]) {
+    const value = cleanDirectiveText(intoMatch[1]);
+    const target = cleanDirectiveTarget(intoMatch[2]);
+    if (value && target && !isGenericVisibleFormInstruction(target)) {
+      return {
+        action: "type_field",
+        raw,
+        target,
+        value
+      };
+    }
+  }
+
+  const match = raw.match(
+    /^(?:fill(?:\s+(?:out|up|in))?|enter|type|input|provide)\s+(?:the\s+|your\s+)?(.+?)\s+(?:with|as|to)\s+["'“]?(.+?)["'”]?$/i
+  );
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+
+  const target = cleanDirectiveTarget(match[1]);
+  const value = cleanDirectiveText(match[2]);
+  if (isGenericVisibleFormInstruction(`${target} ${value}`) || isGenericVisibleFormInstruction(target)) {
+    return null;
+  }
+
+  if (!target || !value) {
+    return null;
+  }
+
+  return {
+    action: "type_field",
+    raw,
+    target,
+    value
+  };
+}
+
+function extractBareNumericEntryDirective(raw: string): TaskDirective | null {
+  const match = raw.match(/^(?:enter|type|input|provide|fill(?:\s+(?:out|up|in))?)\s+([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z₦]+)?$/i);
+  if (!match?.[1]) {
+    return null;
+  }
+
+  const unit = (match[2] ?? "").toLowerCase();
+  return {
+    action: "type_field",
+    raw,
+    target: /\b(?:crypto|usdt|btc|eth|usdc)\b/i.test(unit) ? "crypto amount" : "amount",
+    value: match[1]
+  };
+}
+
 export function parseTaskDirectives(taskText: string): TaskDirective[] {
   const directives: TaskDirective[] = [];
 
@@ -110,8 +188,26 @@ export function parseTaskDirectives(taskText: string): TaskDirective[] {
       continue;
     }
 
+    const compactExchangeAmountDirective = extractCompactExchangeAmountDirective(raw);
+    if (compactExchangeAmountDirective) {
+      directives.push(compactExchangeAmountDirective);
+      continue;
+    }
+
+    const explicitFieldValueDirective = extractExplicitFieldValueDirective(raw);
+    if (explicitFieldValueDirective) {
+      directives.push(explicitFieldValueDirective);
+      continue;
+    }
+
+    const bareNumericEntryDirective = extractBareNumericEntryDirective(raw);
+    if (bareNumericEntryDirective) {
+      directives.push(bareNumericEntryDirective);
+      continue;
+    }
+
     const match = segment.match(
-      /^(click|tap|press|open|select|choose|fill(?:\s+(?:out|up|in))?|enter|type|input|provide|submit|create|register|sign\s*up|signup|join|scroll|swipe|wait|pause|hold|go back|back|stop|halt)\b\s*(.*)$/i
+      /^(click|tap|press|open|select|choose|copy|fill(?:\s+(?:out|up|in))?|enter|type|input|provide|submit|create|register|sign\s*up|signup|join|scroll|swipe|wait|pause|hold|go back|back|stop|halt)\b\s*(.*)$/i
     );
 
     if (!match) {
@@ -126,6 +222,15 @@ export function parseTaskDirectives(taskText: string): TaskDirective[] {
     const verb = (match[1] ?? "").toLowerCase();
     const remainder = match[2] ?? "";
     if (!verb) {
+      continue;
+    }
+
+    if (verb === "copy") {
+      directives.push({
+        action: "click",
+        raw,
+        target: "Copy"
+      });
       continue;
     }
 

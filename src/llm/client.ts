@@ -1,5 +1,4 @@
 import OpenAI from "openai";
-import { zodTextFormat } from "openai/helpers/zod";
 import { toJSONSchema, type ZodType } from "zod";
 import { config, resolveLlmRuntime, type LlmProvider } from "../config.js";
 
@@ -37,18 +36,22 @@ async function generateWithOpenAI<T>(options: {
   timeoutMs?: number;
   maxRetries?: number;
 }): Promise<T> {
-  const response = await getOpenAIClient().responses.parse(
+  const response = await getOpenAIClient().chat.completions.create(
     {
       model: options.model,
-      input: [
+      messages: [
         { role: "system", content: options.systemPrompt },
         {
           role: "user",
           content: JSON.stringify(options.userPayload, null, 2)
         }
       ],
-      text: {
-        format: zodTextFormat(options.schema, options.schemaName)
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: options.schemaName,
+          schema: toJSONSchema(options.schema) as Record<string, unknown>
+        }
       }
     },
     {
@@ -57,7 +60,12 @@ async function generateWithOpenAI<T>(options: {
     }
   );
 
-  return options.schema.parse(response.output_parsed);
+  const rawContent = response.choices[0]?.message?.content?.trim() ?? "";
+  if (!rawContent) {
+    throw new Error("OpenAI-compatible API returned an empty message content.");
+  }
+
+  return options.schema.parse(JSON.parse(stripJsonCodeFence(rawContent)));
 }
 
 const ollamaReachableCache = new Map<string, true>();

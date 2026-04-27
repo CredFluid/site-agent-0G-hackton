@@ -92,7 +92,7 @@ export async function capturePageState(page: Page): Promise<PageState> {
         };
       })
       .filter(Boolean)
-      .slice(0, 60);
+      .slice(0, 100);
 
     const formFields = Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select"))
       .map((element) => {
@@ -136,7 +136,23 @@ export async function capturePageState(page: Page): Promise<PageState> {
           labelParts.push((closestLabel.innerText || closestLabel.textContent || "").replace(/\s+/g, " ").trim());
         }
 
-        labelParts.push((element.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim());
+        const ariaLabel = (element.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+        if (ariaLabel) {
+          labelParts.push(ariaLabel);
+        }
+
+        // If still no labels, look for a preceding text-heavy sibling or parent text
+        if (labelParts.filter(Boolean).length === 0) {
+          let prev = element.previousElementSibling;
+          while (prev) {
+            const text = (prev.textContent || "").replace(/\s+/g, " ").trim();
+            if (text.length > 1 && text.length < 60) {
+              labelParts.push(text);
+              break;
+            }
+            prev = prev.previousElementSibling;
+          }
+        }
 
         const options =
           element instanceof HTMLSelectElement
@@ -174,7 +190,7 @@ export async function capturePageState(page: Page): Promise<PageState> {
         };
       })
       .filter(Boolean)
-      .slice(0, 30);
+      .slice(0, 50);
 
     const numberedElements: string[] = [];
     const seenAgentIds = new Set<string>();

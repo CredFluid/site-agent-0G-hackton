@@ -251,8 +251,8 @@ function extractCompactAmountTaskValue(taskGoal: string): string | null {
 }
 
 function compactTargetsMatch(left: string, right: string): boolean {
-  const normalizedLeft = normalizeVisibleText(left).toLowerCase();
-  const normalizedRight = normalizeVisibleText(right).toLowerCase();
+  const normalizedLeft = normalizeVisibleText(left).toLowerCase().replace(/\s*\/\s*/g, " / ");
+  const normalizedRight = normalizeVisibleText(right).toLowerCase().replace(/\s*\/\s*/g, " / ");
   if (!normalizedLeft || !normalizedRight) {
     return false;
   }
@@ -302,7 +302,8 @@ function taskShouldEndAfterSuccessfulCompactStep(taskGoal: string, history: Task
       (entry) =>
         entry.result.success &&
         entry.decision.action === "type" &&
-        compactTargetsMatch(entry.decision.target || entry.decision.instructionQuote || "", directive.target)
+        (compactTargetsMatch(entry.decision.target || entry.decision.instructionQuote || "", directive.target) ||
+          (directive.value !== undefined && normalizeVisibleText(entry.decision.text) === normalizeVisibleText(directive.value)))
     );
   }
 
@@ -341,6 +342,10 @@ function taskLooksLikeCompactActionFlowStep(taskGoal: string): boolean {
 function taskNeedsContinuousContext(taskGoal: string): boolean {
   const normalized = normalizeVisibleText(taskGoal).toLowerCase();
   return DIRECT_CONTINUATION_VERB_PATTERN.test(normalized) || CONTINUATION_FLOW_PATTERN.test(normalized);
+}
+
+function directiveTargetMatches(directive: ReturnType<typeof parseTaskDirectives>[number] | undefined, pattern: RegExp): boolean {
+  return Boolean(directive && "target" in directive && pattern.test(normalizeVisibleText(directive.target || directive.raw)));
 }
 
 function historyShowsMeaningfulProgress(history: TaskHistoryEntry[]): boolean {
@@ -382,13 +387,29 @@ function shouldContinueFromCurrentPage(args: {
     return false;
   }
 
+  const previousTarget = normalizeVisibleText(previousLastDirective.target || "");
+  const currentTarget = normalizeVisibleText(currentFirstDirective.target || "");
+  if (previousLastDirective.action === "type_field" && currentFirstDirective.action === "click") {
+    return directiveTargetMatches(currentFirstDirective, /\b(?:continue|next|proceed|payment|review|confirm)\b/i);
+  }
+
+  if (previousLastDirective.action === "click" && currentFirstDirective.action === "type_field") {
+    return (
+      /\b(?:continue|next|proceed|payment|review)\b/i.test(previousTarget) &&
+      directiveTargetMatches(currentFirstDirective, /\b(?:bank|account|receiving|recipient|wallet|address|amount)\b/i)
+    );
+  }
+
   if (previousLastDirective.action !== "click" || currentFirstDirective.action !== "click") {
     return false;
   }
 
-  const previousTarget = normalizeVisibleText(previousLastDirective.target || "");
-  const currentTarget = normalizeVisibleText(currentFirstDirective.target || "");
-  return /\b(?:connect|wallet)\b/i.test(previousTarget) && /\b(?:wallet|buy|sell|swap|review|confirm|approve|sign)\b/i.test(currentTarget);
+  return (
+    (/\b(?:connect|wallet)\b/i.test(previousTarget) &&
+      /\b(?:wallet|buy|sell|swap|review|confirm|approve|sign)\b/i.test(currentTarget)) ||
+    (/\b(?:continue|next|proceed|payment|review)\b/i.test(previousTarget) &&
+      /\b(?:paid|payment|continue|next|proceed|confirm|done)\b/i.test(currentTarget))
+  );
 }
 
 function findInteractiveLabelByTargetId(pageState: PageState, targetId: string): string {

@@ -18,7 +18,7 @@ type ReplayClickIndicator = NonNullable<TaskRunResult["history"][number]["result
 type ReplayFrameSource = {
   filePath: string;
   durationMs: number;
-  annotation?: string;
+  annotations?: string[];
   clickIndicator?: ReplayClickIndicator;
 };
 
@@ -47,9 +47,31 @@ function truncateText(value: string, maxLength: number): string {
   return `${value.slice(0, Math.max(1, maxLength - 1)).trimEnd()}...`;
 }
 
-function buildReplayAnnotation(step: number, target: string): string {
-  const cleanedTarget = truncateText(normalizeText(target) || "selected element", 52);
-  return `Step ${step}: Click ${cleanedTarget}`;
+function describeReplayActivity(entry: TaskRunResult["history"][number]): string {
+  const target = normalizeText(entry.result.clickIndicator?.targetLabel ?? entry.decision.target);
+  const fallbackTarget = target || "visible page";
+  const resultLabel = entry.result.success === false ? "failed" : entry.result.stop ? "stopped" : "done";
+
+  switch (entry.decision.action) {
+    case "click":
+      return `Step ${entry.step}: Click ${truncateText(fallbackTarget, 42)} (${resultLabel})`;
+    case "type":
+      return `Step ${entry.step}: Type in ${truncateText(fallbackTarget, 42)} (${resultLabel})`;
+    case "scroll":
+      return `Step ${entry.step}: Scroll page (${resultLabel})`;
+    case "wait":
+      return `Step ${entry.step}: Wait for page (${resultLabel})`;
+    case "back":
+      return `Step ${entry.step}: Go back (${resultLabel})`;
+    case "extract":
+      return `Step ${entry.step}: Capture page state (${resultLabel})`;
+    case "trade":
+      return `Step ${entry.step}: Wallet trade handoff (${resultLabel})`;
+    case "stop":
+      return `Step ${entry.step}: Stop path (${resultLabel})`;
+    default:
+      return `Step ${entry.step}: ${entry.decision.action} (${resultLabel})`;
+  }
 }
 
 function collectReplaySources(args: {
@@ -57,6 +79,38 @@ function collectReplaySources(args: {
   taskResults: TaskRunResult[];
 }): ReplayFrameSource[] {
   const sources: ReplayFrameSource[] = [];
+  const activities = args.taskResults.flatMap((task) => task.history.map((entry) => describeReplayActivity(entry)));
+  let activityIndex = 0;
+
+  function takeActivities(): string[] {
+    if (activities.length === 0) {
+      return [];
+    }
+
+    const remainingSources = Math.max(1, expectedVisualSourceCount - sources.length);
+    const remainingActivities = activities.length - activityIndex;
+    const takeCount = Math.max(1, Math.ceil(remainingActivities / remainingSources));
+    const nextActivities = activities.slice(activityIndex, activityIndex + takeCount);
+    activityIndex += nextActivities.length;
+    return nextActivities;
+  }
+
+  const expectedVisualSourceCount = args.taskResults.reduce(
+    (count, task) =>
+      count +
+      task.history.reduce((entryCount, entry) => {
+        if (entry.decision.action !== "click") {
+          return entryCount;
+        }
+
+        return (
+          entryCount +
+          (entry.result.beforeScreenshotPath ? 1 : 0) +
+          (entry.result.afterScreenshotPath ? 1 : 0)
+        );
+      }, 0),
+    0
+  );
 
   for (const task of args.taskResults) {
     for (const entry of task.history) {
@@ -70,24 +124,35 @@ function collectReplaySources(args: {
       const afterPath = entry.result.afterScreenshotPath
         ? path.join(args.runDir, entry.result.afterScreenshotPath)
         : null;
-      const annotation = buildReplayAnnotation(
-        entry.step,
-        entry.result.clickIndicator?.targetLabel ?? entry.decision.target
-      );
 
       if (beforePath && fs.existsSync(beforePath)) {
         sources.push({
           filePath: beforePath,
           durationMs: BEFORE_FRAME_DURATION_MS,
-          annotation,
+          annotations: takeActivities(),
           ...(entry.result.clickIndicator ? { clickIndicator: entry.result.clickIndicator } : {})
         });
       }
 
       if (afterPath && fs.existsSync(afterPath)) {
-        sources.push({ filePath: afterPath, durationMs: AFTER_FRAME_DURATION_MS });
+        sources.push({
+          filePath: afterPath,
+          durationMs: AFTER_FRAME_DURATION_MS,
+          annotations: takeActivities()
+        });
       }
     }
+  }
+
+  for (let sourceIndex = 0; activityIndex < activities.length && sources.length > 0; sourceIndex += 1) {
+    const source = sources[sourceIndex % sources.length];
+    const activity = activities[activityIndex];
+    if (!source || !activity) {
+      break;
+    }
+
+    source.annotations = [...(source.annotations ?? []), activity];
+    activityIndex += 1;
   }
 
   return sources;
@@ -154,17 +219,21 @@ function buildOverlayBuffer(args: {
   canvasHeight: number;
   sourceWidth?: number;
   sourceHeight?: number;
-  annotation?: string;
+  annotations?: string[];
   clickIndicator?: ReplayClickIndicator;
 }): Buffer | null {
-  const label = args.annotation ? truncateText(args.annotation, 70) : "";
+  const labels = (args.annotations ?? [])
+    .map((annotation) => truncateText(normalizeText(annotation), 76))
+    .filter((annotation) => annotation.length > 0)
+    .slice(0, 5);
   const fontSize = clamp(Math.round(args.canvasWidth * 0.028), 16, 24);
   const labelPaddingX = 14;
-  const labelHeight = fontSize + 18;
-  const labelWidth = label
-    ? Math.min(args.canvasWidth - 24, Math.max(200, Math.round(label.length * (fontSize * 0.62)) + labelPaddingX * 2))
+  const labelLineHeight = Math.round(fontSize * 1.24);
+  const labelHeight = labels.length > 0 ? labels.length * labelLineHeight + 18 : 0;
+  const longestLabel = labels.reduce((longest, label) => Math.max(longest, label.length), 0);
+  const labelWidth = labels.length > 0
+    ? Math.min(args.canvasWidth - 24, Math.max(240, Math.round(longestLabel * (fontSize * 0.58)) + labelPaddingX * 2))
     : 0;
-  const labelTextY = 16 + Math.round(labelHeight / 2 + fontSize * 0.34);
 
   let highlightMarkup = "";
   if (args.clickIndicator && args.sourceWidth && args.sourceHeight) {
@@ -201,23 +270,29 @@ function buildOverlayBuffer(args: {
     `;
   }
 
-  if (!highlightMarkup && !label) {
+  if (!highlightMarkup && labels.length === 0) {
     return null;
   }
+
+  const labelMarkup =
+    labels.length > 0
+      ? `
+            <g>
+              <rect x="16" y="16" width="${labelWidth}" height="${labelHeight}" rx="16" fill="#111827" fill-opacity="0.84" stroke="#ffffff" stroke-opacity="0.25" stroke-width="1" />
+              ${labels
+                .map(
+                  (label, index) =>
+                    `<text x="${16 + labelPaddingX}" y="${16 + 12 + fontSize + index * labelLineHeight}" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" font-weight="700" fill="#ffffff">${escapeXml(label)}</text>`
+                )
+                .join("")}
+            </g>
+          `
+      : "";
 
   const svg = `
     <svg width="${args.canvasWidth}" height="${args.canvasHeight}" viewBox="0 0 ${args.canvasWidth} ${args.canvasHeight}" xmlns="http://www.w3.org/2000/svg">
       ${highlightMarkup}
-      ${
-        label
-          ? `
-            <g>
-              <rect x="16" y="16" width="${labelWidth}" height="${labelHeight}" rx="${Math.round(labelHeight / 2)}" fill="#111827" fill-opacity="0.84" stroke="#ffffff" stroke-opacity="0.25" stroke-width="1" />
-              <text x="${16 + labelPaddingX}" y="${labelTextY}" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" font-weight="700" fill="#ffffff">${escapeXml(label)}</text>
-            </g>
-          `
-          : ""
-      }
+      ${labelMarkup}
     </svg>
   `;
 
@@ -246,7 +321,7 @@ async function buildReplayFrameBuffer(args: {
     canvasHeight: args.height,
     ...(metadata.width ? { sourceWidth: metadata.width } : {}),
     ...(metadata.height ? { sourceHeight: metadata.height } : {}),
-    ...(args.source.annotation ? { annotation: args.source.annotation } : {}),
+    ...(args.source.annotations ? { annotations: args.source.annotations } : {}),
     ...(args.source.clickIndicator ? { clickIndicator: args.source.clickIndicator } : {})
   });
 

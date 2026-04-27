@@ -37,7 +37,7 @@ User submits URL + tasks
 │  LLM evaluates the run       │
 │  → Scored report (1-10)      │
 │  → HTML / Markdown / JSON    │
-│  → Click replay animation    │
+│  → Activity replay animation │
 └─────────────────────────────┘
 ```
 
@@ -46,12 +46,14 @@ User submits URL + tasks
 ## Features
 
 - **Task-driven execution** — the agent follows only the tasks you provide, nothing more
-- **Step-by-step evidence** — every click, page state, console error, and network failure is logged
+- **Step-by-step evidence** — every interaction, page state, relevant console signal, and network failure is logged
+- **Ordered instruction parsing** — pasted instructions, bullet lists, JSON tasks, and uploaded text files are normalized into accepted task lanes
 - **Independent evaluation** — the LLM scores from captured evidence, not from the agent's own impressions
 - **Multi-agent perspectives** — run 1–5 agents with different personas on the same site, merged into one report
 - **Auth-aware** — detects login walls mid-run, fills signup forms, polls IMAP for OTP/verification emails
 - **Supplemental audits** — SEO crawl, security headers, performance timings, accessibility (axe-core), CRO signals, content readability, mobile layout
-- **Click replay** — animated WebP of before/after screenshots for every click
+- **Activity replay** — compact animated WebP that overlays all recorded agent actions onto the captured click frames
+- **Exchange-flow QA** — safely tests Naira/crypto buy and sell flows with harmless values and stops before real transfers
 - **Dual LLM support** — OpenAI (GPT-5) for production, Ollama for local/private development
 - **Two deployment modes** — CLI or web dashboard, including Render web service deployment
 
@@ -109,8 +111,10 @@ Artifacts are saved to `runs/<run-id>/`:
 | `raw-events.json` | Every browser event, console log, and network request |
 | `accessibility.json` | axe-core violation list |
 | `site-checks.json` | SEO, performance, security, CRO, content, mobile checks |
-| `click-replay.webp` | Animated before/after click screenshots |
+| `click-replay.webp` | Compact animated activity replay with click screenshots and overlays for all recorded actions |
 | `inputs.json` | Run configuration and timing metadata |
+| `trade-executions.json` | Optional deterministic trade validation/execution records when trade mode is enabled |
+| `trade-instruction.json` | Optional standalone trade CLI input copy when `npm run trade:run` is used |
 
 ---
 
@@ -137,6 +141,16 @@ npm run dev -- --url http://127.0.0.1:3000 --task "Check the homepage CTA" \
 
 # Allow self-signed HTTPS certificates
 npm run dev -- --url https://localhost:3000 --task "Check the homepage" --ignore-https-errors
+
+# Exchange-flow QA without real transfers
+npm run dev -- --url https://example.com \
+  --task "Click Buy; enter 50000 NGN; confirm the crypto preview updates; copy the account number if available; stop before making any real payment" \
+  --task "Click Sell; enter 0.01 USDT; confirm the Naira payout preview updates; stop before sending any real crypto"
+
+# Deterministic onchain validation in dry-run mode
+npm run dev -- --url https://example-dapp.test \
+  --task "Sell 0.01 USDC using the visible deposit address" \
+  --trade-dry-run --trade-strategy deposit_only
 ```
 
 > **Note:** Every CLI run requires at least one `--task` flag. Runs with no tasks are rejected.
@@ -160,6 +174,10 @@ npm run dev -- --url https://localhost:3000 --task "Check the homepage" --ignore
 | `--signup-url <url>` | Signup page URL (absolute or relative) |
 | `--login-url <url>` | Login page URL (absolute or relative) |
 | `--access-url <url>` | Protected page URL to verify after login |
+| `--trade-enabled` | Allow deterministic onchain trade execution for this run |
+| `--trade-dry-run` | Validate extracted trade details without broadcasting a transaction |
+| `--trade-strategy <strategy>` | Trade strategy: `auto`, `dapp_only`, or `deposit_only` |
+| `--trade-confirmations <count>` | Confirmations to wait for before marking a trade confirmed, 0–12 |
 
 ---
 
@@ -171,7 +189,7 @@ npm run dashboard
 
 | URL | Purpose |
 |---|---|
-| `http://localhost:4173/` | Public submission form — enter URL + tasks |
+| `http://localhost:4173/` | Public submission form — enter URL, paste instructions, or upload text/JSON tasks |
 | `http://localhost:4173/dashboard` | Internal run dashboard — inspect all results |
 | `/submissions/<id>` | Submission progress tracking |
 | `/r/<token>` | Public shareable report link (valid 30 days) |
@@ -180,9 +198,12 @@ npm run dashboard
 | `/api/runs/<id>` | REST API — run detail |
 
 The dashboard supports:
+- Instruction paste box plus optional `.txt`, `.md`, `.json`, or `.csv` upload
+- Public-hosted or localhost/private target mode for local development
 - 1–5 concurrent agent perspectives per submission
+- Per-submission trade controls for enablement, dry-run, strategy, and confirmation count
 - Aggregate and per-agent report inspection
-- Artifact downloads (JSON, Markdown, HTML, WebP click replay)
+- Artifact downloads (JSON, Markdown, HTML, WebP activity replay)
 - Strengths, weaknesses, and top fix recommendations
 
 ---
@@ -273,6 +294,8 @@ PLAYWRIGHT_STORAGE_STATE_PATH=.auth/session.json
 | `AUTH_OTP_LENGTH` | `6` | Expected OTP digit count |
 | `AUTH_EMAIL_FROM_FILTER` | — | Filter emails by sender |
 | `AUTH_EMAIL_SUBJECT_FILTER` | — | Filter emails by subject |
+| `AUTH_GENERATED_IDENTITY_MAX_ATTEMPTS` | `5` | Signup retry count when a generated identity is rejected |
+| `AUTH_EMAIL_DOMAIN` | — | Override the generated plus-address domain |
 | `AUTH_SIGNUP_URL` | — | Default signup URL (instead of CLI flag) |
 | `AUTH_LOGIN_URL` | — | Default login URL |
 | `AUTH_ACCESS_URL` | — | Default protected page URL |
@@ -302,6 +325,32 @@ WALLET_CHAIN_ID=11155111
 ```
 
 Once configured, the agent will automatically inject the wallet into every page it visits. The LLM planner is also aware of its wallet address and can interact with "Connect Wallet" flows.
+
+### Deterministic Trade Execution
+
+Trade execution is off by default unless `TRADE_ENABLED=true` or a run explicitly passes `--trade-enabled` or `--trade-dry-run`. When enabled, the agent only attempts a deterministic EVM sell/deposit handoff when the visible page and task provide enough evidence for recipient address, token, chain, and amount. Dry-run mode validates the extracted instruction and writes `trade-executions.json` without broadcasting.
+
+Useful controls:
+
+```bash
+# Validate only; do not broadcast
+--trade-dry-run
+
+# Broadcast only if validation passes
+--trade-enabled
+
+# Choose how to handle the visible trade path
+--trade-strategy auto|dapp_only|deposit_only
+```
+
+For a standalone trade instruction JSON file, use:
+
+```bash
+npm run trade:run -- --instruction ./sell-instruction.json --strategy deposit_only
+
+# Add --broadcast only when you are ready to send the transaction
+npm run trade:run -- --instruction ./sell-instruction.json --broadcast
+```
 
 ### Using MetaMask Extension Mode
 
@@ -342,6 +391,7 @@ All settings are read from environment variables (`.env` file).
 | `MAX_STEPS_PER_TASK` | `32` | Max actions per task |
 | `ACTION_DELAY_MS` | `600` | Delay between actions (human-like pacing) |
 | `NAVIGATION_TIMEOUT_MS` | `25000` | Page load timeout |
+| `RECORD_VIDEO` | `false` | Record Playwright video into the run directory |
 
 ### Browser
 
@@ -352,6 +402,18 @@ All settings are read from environment variables (`.env` file).
 | `PLAYWRIGHT_EXECUTABLE_PATH` | — | Custom Chromium binary path |
 | `USE_SERVERLESS_CHROMIUM` | — | Force `@sparticuz/chromium` |
 | `SPARTICUZ_CHROMIUM_LOCATION` | — | Chromium binary location hint |
+
+### Trade Policy
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRADE_ENABLED` | `false` | Enable deterministic trade execution by default |
+| `TRADE_ALLOWLISTED_CHAIN_IDS` | — | Comma-separated chain IDs allowed for trade execution |
+| `TRADE_TOKEN_REGISTRY` | `[]` | JSON array of `{ chainId, symbol, assetKind, contract?, decimals }` entries |
+| `TRADE_MAX_TOKEN_AMOUNT` | — | Maximum token amount allowed by policy |
+| `TRADE_REQUIRE_EXACT_TOKEN_CONTRACT` | `true` | Require ERC-20 contract matches when validating trades |
+| `TRADE_CONFIRMATIONS_REQUIRED` | `1` | Default confirmations to wait for, 0–12 |
+| `TRADE_RECEIPT_TIMEOUT_MS` | `120000` | Max wait time for transaction receipt/confirmation |
 
 ### Dashboard & Deployment
 
@@ -383,15 +445,26 @@ Since the agent follows only your tasks, structure them as focused coverage lane
 
 # Probe edge cases
 --task "Enter an invalid email in the signup form and check the error message"
+
+# Safely test an exchange flow
+--task "Click Buy; enter 50000 NGN; confirm the crypto preview updates; provide a harmless test wallet address; verify the payment account card appears; stop before making any real payment"
+
+# Ask for monitoring evidence
+--task "Check exchange-flow monitoring evidence for amount entry, wallet submission, bank submission, displayed account details, copy actions, and transfer attempts"
 ```
 
 **Tips for better results:**
 - Write **specific, concrete actions** — not "explore the site"
+- Use ordered verbs like **click**, **enter**, **copy**, **scroll**, **wait**, **go back**, and **stop** when the sequence matters
+- Include literal values when needed, for example `enter 50000 NGN` or `type "test@example.com" into email`
 - Split large journeys into **separate tasks** so early clicks don't consume the entire budget
+- Paste multi-line instructions or upload text/JSON files in the dashboard when tasks come from a spec
+- A combined Naira/crypto exchange spec that mentions Buy flow, Sell flow, Naira, crypto, and logging/monitoring/events is expanded into separate Buy, Sell, and monitoring tasks
 - For slow sites, increase `NAVIGATION_TIMEOUT_MS` before increasing step counts
 - Use `--storage-state` for pages behind authentication
 - Run **multiple agent perspectives** (2-5) when you want broader coverage
 - For game sites, be explicit: "Play 5 rounds and record each win or loss"
+- For exchange/payment QA, use harmless test values and explicitly tell the agent to stop before any real payment, crypto transfer, purchase, or payout
 
 ---
 
@@ -444,11 +517,12 @@ High-level summary:
 | **Entry points** | `cli/run.ts`, `dashboard/server.ts` | CLI and web UI |
 | **Orchestration** | `runAuditJob.ts`, `processSubmissionBatch.ts` | Single-run and multi-agent execution |
 | **Agent loop** | `runner.ts` → `planner.ts` → `executor.ts` | Capture state → LLM plans → Playwright acts |
-| **Page understanding** | `pageState.ts`, `siteBrief.ts`, `taskDirectives.ts` | DOM snapshots, site comprehension, instruction parsing |
+| **Page understanding** | `pageState.ts`, `siteBrief.ts`, `taskDirectives.ts`, `submissions/customTasks.ts` | DOM snapshots, site comprehension, ordered instruction and upload parsing |
 | **Authentication** | `auth/profile.ts`, `auth/inbox.ts`, `auth/runner.ts` | Identity management, IMAP OTP polling, login flows |
 | **Evaluation** | `evaluator.ts`, `aggregateReport.ts` | LLM scoring, multi-agent result merging |
 | **Site checks** | `siteChecks.ts`, `audit.ts` | SEO, performance, security, accessibility |
-| **Reporting** | `reporting/html.ts`, `reporting/markdown.ts`, `clickReplay.ts` | HTML/MD/JSON reports, click replay animation |
+| **Reporting** | `reporting/html.ts`, `reporting/markdown.ts`, `clickReplay.ts` | HTML/MD/JSON reports, activity replay animation |
+| **Trade safety** | `trade/*`, `wallet/*` | Wallet injection, deterministic trade extraction, policy validation, dry-run/broadcast records |
 | **LLM** | `llm/client.ts`, `prompts/browserAgent.ts`, `prompts/reviewer.ts` | OpenAI + Ollama client, system prompts |
 
 ---
@@ -460,6 +534,7 @@ High-level summary:
 - **No unsupported claims** — the evaluator scores from evidence only, not from the agent's impressions
 - **Task-required** — every run must have at least one explicit task
 - **Legitimate sessions only** — storage state reuse is for approved, pre-established sessions
+- **Trade-safe by default** — onchain execution is disabled unless explicitly enabled, and exchange-flow QA should stop before real-world transfers
 
 ---
 

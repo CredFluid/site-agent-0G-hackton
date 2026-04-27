@@ -79,6 +79,14 @@ function collapseSequentialFormFlowTasks(tasks: string[]): string[] {
   return [tasks.join("; ")];
 }
 
+function isNairaCryptoExchangeTask(task: string): boolean {
+  return /\b(?:buy|sell)\s+flow\b/i.test(task) && /\bnaira|ngn\b/i.test(task) && /\bcrypto|token|wallet\b/i.test(task);
+}
+
+function isExchangeMonitoringTask(task: string): boolean {
+  return /\bexchange-flow monitoring\b|\bmonitoring evidence\b/i.test(task) && /\bevents?|logs?\b/i.test(task);
+}
+
 export function buildCustomTaskSuite(tasks: string[]): TaskSuite {
   const { actionTasks, runWideConstraints } = partitionTaskDirectives(tasks);
   const collapsedActionTasks = collapseSequentialFormFlowTasks(actionTasks);
@@ -106,7 +114,8 @@ export function buildCustomTaskSuite(tasks: string[]): TaskSuite {
         "When a task contains explicit named controls or ordered action verbs, follow those literally in order. Only choose a reasonable visible path when the user did not specify the next step.",
         "Confirm whether the requested destination, content, or state actually appears before claiming success.",
         "If a task stalls, dead-ends, loops, or becomes misleading, verify that before moving on.",
-        "Do not enter personal, financial, or secret information.",
+        "Do not enter personal, financial, or secret information unless the accepted task explicitly requires harmless test wallet, bank, or amount values for a flow QA check.",
+        "For exchange-flow QA tasks, stop before making any real Naira payment, crypto transfer, purchase, or irreversible payout.",
         "Use harmless test input only when typing is necessary to evaluate a public interaction safely.",
         "Record blockers honestly when a task requires login, payment, invite-only access, or other gated access.",
         "Give a direct, evidence-based account of which requested tasks worked, partially worked, or failed.",
@@ -117,7 +126,11 @@ export function buildCustomTaskSuite(tasks: string[]): TaskSuite {
       const taskProfile = classifyTaskText(task);
       const gameplay = inferGameplayConfigFromTask(task);
       const successCondition =
-        gameplay?.rounds
+        isNairaCryptoExchangeTask(task)
+          ? "The agent can safely exercise the requested exchange direction with harmless test values, verify the amount preview, required destination details, payment/address display card, copy behavior, and stop before any real money or crypto is transferred."
+          : isExchangeMonitoringTask(task)
+            ? "The agent can report whether relevant console logs, debug messages, analytics events, or visible emitted-event evidence appeared for the important exchange-flow stages."
+            : gameplay?.rounds
           ? `The agent can reach a fair playable state, record ${gameplay.rounds} visible round outcome(s), and honestly report the wins, losses, or draws that actually appeared.`
           : taskProfile.engagement
             ? "The agent can follow the visible path, meaningfully use the live controls it reaches, and honestly report what visibly happened."
@@ -142,6 +155,16 @@ export function buildCustomTaskSuite(tasks: string[]): TaskSuite {
           : []),
         ...(taskProfile.instructionFocus
           ? ["the visible rules, instructions, or how-to-play guidance cannot be clearly confirmed"]
+          : []),
+        ...(isNairaCryptoExchangeTask(task)
+          ? [
+              "the flow does not request the required wallet or bank destination before showing payment details",
+              "the quoted conversion preview, account card, business wallet address, or copy control cannot be confirmed",
+              "the flow attempts to require or trigger a real payment or crypto transfer during the test"
+            ]
+          : []),
+        ...(isExchangeMonitoringTask(task)
+          ? ["no relevant monitoring log, emitted event, debug message, or console evidence can be observed for the requested exchange stages"]
           : [])
       ];
 

@@ -412,7 +412,7 @@ function directiveTargetsMatch(left: string, right: string): boolean {
 
 function scoreInteractiveForDirectiveTarget(item: PageState["interactive"][number], target: string): number {
   const label = getInteractiveLabel(item);
-  if (!label || item.disabled || isTransientStatusLabel(label)) {
+  if (!label || isTransientStatusLabel(label)) {
     return Number.NEGATIVE_INFINITY;
   }
 
@@ -437,6 +437,10 @@ function scoreInteractiveForDirectiveTarget(item: PageState["interactive"][numbe
   const tag = item.tag.toLowerCase();
   if (role === "button" || role === "tab" || role === "link" || tag === "button" || tag === "a") {
     score += 10;
+  }
+
+  if (item.disabled) {
+    score -= 60;
   }
 
   return score;
@@ -749,10 +753,16 @@ function extractLiteralFieldEntryTask(taskGoal: string): { value: string; target
 function findTradeAmountField(pageState: PageState): PageState["formFields"][number] | null {
   const ranked = pageState.formFields
     .map((field) => {
-      const key = normalizeKey([field.label, field.placeholder, field.name, field.id].join(" "));
+      const key = normalizeKey([field.label, field.placeholder, field.name, field.id, field.inputType, field.inputMode].join(" "));
       let score = scoreFormFieldTargetMatch(field, "amount");
       if (/\bamount\b/.test(key)) {
         score += 120;
+      }
+      if (field.inputType === "number" || field.inputMode === "numeric" || field.inputMode === "decimal") {
+        score += 90;
+      }
+      if (/^(?:0(?:\.0+)?|[0-9]+(?:\.[0-9]+)?)$/.test(normalizeKey(field.placeholder))) {
+        score += 45;
       }
       if (/\b(?:qty|quantity|size|value)\b/.test(key)) {
         score += 40;
@@ -770,6 +780,24 @@ function findTradeAmountField(pageState: PageState): PageState["formFields"][num
 }
 
 function findExplicitEntryField(pageState: PageState, target: string): PageState["formFields"][number] | null {
+  if (/\b(?:naira|ngn)\b/i.test(target)) {
+    const nairaField = pageState.formFields.find((field) =>
+      /\b(?:ngn|naira|pay|spend)\b/i.test([field.label, field.placeholder, field.name, field.id].join(" "))
+    );
+    if (nairaField) {
+      return nairaField;
+    }
+  }
+
+  if (/\bcrypto\b/i.test(target) || /\b(?:usdt|btc|eth|usdc|token)\b/i.test(target)) {
+    const cryptoField = pageState.formFields.find((field) =>
+      /\b(?:crypto|token|usdt|btc|eth|receive|sell|receive|amount|qty)\b/i.test([field.label, field.placeholder, field.name, field.id].join(" "))
+    );
+    if (cryptoField) {
+      return cryptoField;
+    }
+  }
+
   return (
     findMatchingFormField(pageState, target) ??
     (/\b(?:amount|qty|quantity|size|value)\b/i.test(target) ? findTradeAmountField(pageState) : null)
@@ -1085,10 +1113,15 @@ function enforceOrderedTaskDirectives(args: {
 
     if (directive.action === "type_field") {
       const explicitValue =
-        literalFieldEntryTask && normalizeKey(directive.target).includes(normalizeKey(literalFieldEntryTask.target))
+        directive.value ??
+        (literalFieldEntryTask && normalizeKey(directive.target).includes(normalizeKey(literalFieldEntryTask.target))
           ? literalFieldEntryTask.value
-          : null;
-      const field = findExplicitEntryField(args.pageState, explicitValue ? literalFieldEntryTask!.target : directive.target);
+          : null);
+      const explicitTarget =
+        explicitValue && literalFieldEntryTask && normalizeKey(directive.target).includes(normalizeKey(literalFieldEntryTask.target))
+          ? literalFieldEntryTask.target
+          : directive.target;
+      const field = findExplicitEntryField(args.pageState, explicitTarget);
       if (!field) {
         continue;
       }
@@ -1474,6 +1507,15 @@ function buildFallbackDecision(args: {
       expectation: "Extract the visible trade instruction and hand it to the deterministic wallet executor once.",
       friction: "medium"
     };
+  }
+
+  if (taskHasPendingExplicitDirective(task.goal, args.history)) {
+    return buildStopDecision({
+      thought:
+        "Model planning was unavailable and a submitted ordered step is still pending, but it does not currently map to a safe visible field or control.",
+      expectation: "Stop instead of treating unrelated visible page labels as new instructions.",
+      friction: "high"
+    });
   }
 
   const pageEvidenceText = normalizeTaskText([args.pageState.title, args.pageState.visibleText, ...args.pageState.headings].join(" "));

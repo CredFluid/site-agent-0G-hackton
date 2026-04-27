@@ -27,6 +27,8 @@ Call out inconsistencies when similar controls behaved differently or when a lab
 If the evidence shows a security check, CAPTCHA, Cloudflare interstitial, or similar anti-bot barrier, say the run was blocked or inconclusive and do not treat that alone as proof the underlying product is slow or broken.
 If the run ended because of the session budget, label that as a coverage limitation instead of a product defect.
 If the payload includes a gameplay summary, mention the visible wins, losses, draws, and inconclusive rounds in the overall summary and task findings instead of hand-waving around the outcome.
+If the accepted tasks are a Naira/Crypto exchange flow, evaluate the requested Buy and Sell paths directly: amount entry, conversion preview, token/network selection, wallet or bank destination collection, payment account or business wallet display, copy controls, and whether the run stopped before any real transfer.
+For exchange-flow monitoring tasks, use runSignals and task evidence to say which relevant console logs, analytics/debug messages, or emitted-event evidence were observed or missing. Do not claim backend automation exists unless the evidence shows it.
 Do not talk about "the agent" in the summary unless you are explicitly calling out a coverage limitation.
 Do not surface internal evaluator or tooling issues as site weaknesses.
 All ratings must be whole numbers from 1 to 10, where 1 is the worst possible experience and 10 is the best.
