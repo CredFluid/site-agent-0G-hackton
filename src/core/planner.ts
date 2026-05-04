@@ -4,6 +4,7 @@ import { generateStructured, type LlmRuntimeOptions } from "../llm/client.js";
 import { isWalletConfigured, getWalletAddress, getWalletChainId } from "../wallet/wallet.js";
 import { BROWSER_AGENT_PROMPT } from "../prompts/browserAgent.js";
 import {
+  buildFormFieldKey,
   scoreFormFieldTargetMatch,
   inferFormFieldValue as inferProfileFormFieldValue,
   isPlaceholderFieldValue as isPlaceholderProfileFieldValue,
@@ -306,6 +307,7 @@ function buildInvalidTargetIdStopDecision(args: {
 }
 
 function enforceTargetIdDecision(args: {
+  taskGoal: string;
   pageState: PageState;
   decision: PlannerDecision;
 }): PlannerDecision {
@@ -324,7 +326,30 @@ function enforceTargetIdDecision(args: {
     }
 
     const inferredValue = inferFormFieldValue(fieldTarget, args.pageState.url);
-    if (inferredValue && inferredValue !== decision.text && !shouldCheckField(inferredValue)) {
+    const explicitEntry = findExplicitFieldEntryForField({
+      pageState: args.pageState,
+      taskGoal: args.taskGoal,
+      field: fieldTarget
+    });
+    if (explicitEntry) {
+      return {
+        ...decision,
+        text: explicitEntry.value,
+        thought:
+          decision.text === explicitEntry.value
+            ? decision.thought
+            : `${decision.thought} (Using the exact user-supplied value '${explicitEntry.value}' for '${explicitEntry.target}'.)`
+      };
+    }
+
+    const plannerText = normalizeLineText(decision.text || "");
+    const fieldKey = buildFormFieldKey(fieldTarget);
+    const plannerTextLooksIntentional =
+      plannerText.length > 0 &&
+      ((/\b(?:amount|slippage|gas|token|contract)\b/i.test(fieldKey) && /^[0-9]+(?:\.[0-9]+)?$/.test(plannerText)) ||
+        (/\b(?:wallet|recipient|crypto\s+address|address)\b/i.test(fieldKey) && /^0x[a-fA-F0-9]{40}$/.test(plannerText)));
+
+    if (inferredValue && inferredValue !== decision.text && !shouldCheckField(inferredValue) && !plannerTextLooksIntentional) {
       return {
         ...decision,
         text: inferredValue,
@@ -383,6 +408,28 @@ function enforceLoopAvoidance(args: {
 
 function historyHasAnyTradeAttempt(history: TaskHistoryEntry[]): boolean {
   return history.some((entry) => entry.decision.action === "trade");
+}
+
+function historyHasRealTransactionClick(history: TaskHistoryEntry[]): boolean {
+  return history.some(
+    (entry) =>
+      entry.decision.action === "click" &&
+      entry.result.success &&
+      /\bexecute\s+real\s+transaction\b/i.test(entry.decision.target || entry.decision.instructionQuote || "")
+  );
+}
+
+function pageShowsTradePending(pageState: PageState): boolean {
+  const text = normalizeTaskText([pageState.title, pageState.visibleText, ...pageState.headings, ...pageState.modalHints].join(" "));
+  return /\b(?:sending|broadcasting|confirming|processing|pending|submitted)\b/i.test(text) && /\b(?:sell|buy|swap|send|transfer|transaction|tx)\b/i.test(text);
+}
+
+function pageShowsTradeFinalOutcome(pageState: PageState): boolean {
+  const text = normalizeTaskText([pageState.title, pageState.visibleText, ...pageState.headings, ...pageState.modalHints].join(" "));
+  return (
+    /\b(?:sell|buy|swap|send|transfer|transaction|tx)\b/i.test(text) &&
+    /\b(?:succeeded|success|successful|confirmed|completed|broadcast|failed|reverted|rejected|denied|cancelled|canceled|error)\b/i.test(text)
+  );
 }
 
 function directiveTargetsMatch(left: string, right: string): boolean {
@@ -733,9 +780,9 @@ function extractCompactAmountTask(taskGoal: string): { action: "buy" | "sell" | 
 }
 
 function extractLiteralFieldEntryTask(taskGoal: string): { value: string; target: string } | null {
-  const normalized = normalizeLineText(taskGoal).replace(/^step\s+\d+[:.)-]?\s*/i, "");
+  const normalized = normalizeLineText(taskGoal).replace(/^(?:task|step)\s+\d+[:.)-]?\s*/i, "");
   const match = normalized.match(
-    /^(?:enter|type|fill|input|provide)\s+["'“]?(.+?)["'”]?\s+in\s+(?:the\s+)?(.+?)(?:\s+(?:field|box|input|textbox|text box|value|details?))?$/i
+    /^(?:enter|type|fill|input|provide)\s+["'“]?(.+?)["'”]?\s+(?:in|into)\s+(?:the\s+)?(.+?)(?:\s+(?:field|box|input|textbox|text box|value|details?))?$/i
   );
   if (!match?.[1] || !match[2]) {
     return null;
@@ -802,6 +849,41 @@ function findExplicitEntryField(pageState: PageState, target: string): PageState
     findMatchingFormField(pageState, target) ??
     (/\b(?:amount|qty|quantity|size|value)\b/i.test(target) ? findTradeAmountField(pageState) : null)
   );
+}
+
+function findExplicitFieldEntryForField(args: {
+  pageState: PageState;
+  taskGoal: string;
+  field: PageState["formFields"][number];
+}): { value: string; target: string } | null {
+  const candidates = parseTaskDirectives(args.taskGoal)
+    .filter((directive): directive is Extract<TaskDirective, { action: "type_field" }> => directive.action === "type_field" && !!directive.value)
+    .map((directive) => ({
+      value: directive.value ?? "",
+      target: directive.target
+    }));
+
+  const literalFieldEntryTask = extractLiteralFieldEntryTask(args.taskGoal);
+  if (literalFieldEntryTask) {
+    candidates.push(literalFieldEntryTask);
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate.value || !candidate.target) {
+      continue;
+    }
+
+    const matchedField = findExplicitEntryField(args.pageState, candidate.target);
+    if (matchedField === args.field) {
+      return candidate;
+    }
+
+    if (scoreFormFieldTargetMatch(args.field, candidate.target) >= 80) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 function resolveFormFieldTarget(field: PageState["formFields"][number]): string {
@@ -978,11 +1060,17 @@ function decisionTargetsPendingField(args: {
 }
 
 function buildFormFirstDecision(args: {
+  taskGoal: string;
   pageState: PageState;
   pendingField: PageState["formFields"][number];
   originalDecision: PlannerDecision;
 }): PlannerDecision {
-  const text = inferFormFieldValue(args.pendingField, args.pageState.url);
+  const explicitEntry = findExplicitFieldEntryForField({
+    pageState: args.pageState,
+    taskGoal: args.taskGoal,
+    field: args.pendingField
+  });
+  const text = explicitEntry?.value ?? inferFormFieldValue(args.pendingField, args.pageState.url);
   const target = resolveFormFieldTarget(args.pendingField);
   const stepReference = findFormFieldStepReference({
     pageState: args.pageState,
@@ -994,14 +1082,18 @@ function buildFormFirstDecision(args: {
   }
 
   return {
-    thought: `A visible form is still incomplete, so '${args.originalDecision.target || args.originalDecision.instructionQuote}' must wait until the next unresolved field is filled first.`,
+    thought: explicitEntry
+      ? `The user supplied '${explicitEntry.value}' for '${explicitEntry.target}', so that exact value must be entered before '${args.originalDecision.target || args.originalDecision.instructionQuote}' can proceed.`
+      : `A visible form is still incomplete, so '${args.originalDecision.target || args.originalDecision.instructionQuote}' must wait until the next unresolved field is filled first.`,
     stepNumber: stepReference.stepNumber,
     instructionQuote: stepReference.instructionQuote,
     action: "type",
     target_id: args.pendingField.agentId,
     target,
     text,
-    expectation: `Fill '${target}' before attempting any later field or submit action on this form.`,
+    expectation: explicitEntry
+      ? `Fill '${target}' with exactly '${explicitEntry.value}' before attempting any later action on this form.`
+      : `Fill '${target}' before attempting any later field or submit action on this form.`,
     friction: "medium"
   };
 }
@@ -1052,6 +1144,7 @@ function enforceFormFirstDecision(args: {
   }
 
   return buildFormFirstDecision({
+    taskGoal: args.taskGoal,
     pageState: args.pageState,
     pendingField,
     originalDecision: args.decision
@@ -1181,6 +1274,7 @@ function enforceOrderedTaskDirectives(args: {
       }
 
       return buildFormFirstDecision({
+        taskGoal: args.task.goal,
         pageState: args.pageState,
         pendingField,
         originalDecision: args.decision
@@ -1201,6 +1295,7 @@ function enforceOrderedTaskDirectives(args: {
       const pendingField = findFirstPendingFormField(args.pageState);
       if (pendingField) {
         return buildFormFirstDecision({
+          taskGoal: args.task.goal,
           pageState: args.pageState,
           pendingField,
           originalDecision: args.decision
@@ -1343,6 +1438,32 @@ function buildFallbackDecision(args: {
     });
   }
 
+  if (historyHasRealTransactionClick(args.history)) {
+    if (pageShowsTradeFinalOutcome(args.pageState)) {
+      return buildStopDecision({
+        thought:
+          "Model planning was unavailable, but the real transaction flow has reached a visible final outcome after the execute step.",
+        expectation: "Stop and report the visible transaction result instead of editing any remaining optional form fields.",
+        friction: "low"
+      });
+    }
+
+    if (pageShowsTradePending(args.pageState)) {
+      return {
+        thought:
+          "Model planning was unavailable, but a real transaction was already submitted and the page still shows it as sending or pending.",
+        stepNumber: null,
+        instructionQuote: "",
+        action: "wait",
+        target_id: "",
+        target: "",
+        text: "",
+        expectation: "Wait for the transaction to settle to a visible success, failure, broadcast, or confirmation state before taking any other action.",
+        friction: "low"
+      };
+    }
+  }
+
   const compactAmountTask = extractCompactAmountTask(task.goal);
   if (compactAmountTask) {
     const amountField = findTradeAmountField(args.pageState);
@@ -1468,7 +1589,12 @@ function buildFallbackDecision(args: {
 
   if (pendingField) {
     const target = resolveFormFieldTarget(pendingField);
-    const text = inferFormFieldValue(pendingField, args.pageState.url);
+    const explicitEntry = findExplicitFieldEntryForField({
+      pageState: args.pageState,
+      taskGoal: task.goal,
+      field: pendingField
+    });
+    const text = explicitEntry?.value ?? inferFormFieldValue(pendingField, args.pageState.url);
     const stepReference = findFormFieldStepReference({
       pageState: args.pageState,
       field: pendingField
@@ -1476,14 +1602,18 @@ function buildFallbackDecision(args: {
 
     if (text) {
       return {
-        thought: "Model planning was unavailable, so follow strict form order and fill the first unresolved visible field before any later action.",
+        thought: explicitEntry
+          ? `Model planning was unavailable, but the user supplied '${explicitEntry.value}' for '${explicitEntry.target}', so use that exact value for the matching unresolved field.`
+          : "Model planning was unavailable, so follow strict form order and fill the first unresolved visible field before any later action.",
         stepNumber: stepReference.stepNumber,
         instructionQuote: stepReference.instructionQuote,
         action: "type",
         target_id: pendingField.agentId,
         target,
         text,
-        expectation: `Fill '${target}' with a safe dummy value and wait for the field state to update before moving on.`,
+        expectation: explicitEntry
+          ? `Fill '${target}' with exactly '${explicitEntry.value}' and wait for the field state to update before moving on.`
+          : `Fill '${target}' with a safe fallback value and wait for the field state to update before moving on.`,
         friction: "medium"
       };
     }
@@ -1844,6 +1974,7 @@ function finalizePlannerDecision(args: {
   return enforceLoopAvoidance({
     history: args.history,
     decision: enforceTargetIdDecision({
+      taskGoal: args.task.goal,
       pageState: args.pageState,
       decision: enforceFormFirstDecision({
         taskGoal: args.task.goal,

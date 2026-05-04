@@ -13,7 +13,10 @@ function getOpenAIClient(): OpenAI {
     throw new Error("OPENAI_API_KEY is required when the selected LLM provider is openai.");
   }
 
-  return new OpenAI({ apiKey: config.openaiApiKey });
+  return new OpenAI({
+    apiKey: config.openaiApiKey,
+    ...(config.openaiBaseUrl ? { baseURL: config.openaiBaseUrl } : {})
+  });
 }
 
 function cleanErrorMessage(error: unknown): string {
@@ -52,7 +55,9 @@ async function generateWithOpenAI<T>(options: {
           name: options.schemaName,
           schema: toJSONSchema(options.schema) as Record<string, unknown>
         }
-      }
+      },
+      ...(config.openaiTemperature !== undefined ? { temperature: config.openaiTemperature } : {}),
+      ...(config.openaiMaxTokens !== undefined ? { max_tokens: config.openaiMaxTokens } : {})
     },
     {
       ...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -206,6 +211,25 @@ async function generateWithOllama<T>(options: {
   throw new Error(cleanErrorMessage(lastError));
 }
 
+/** Minimum delay (ms) between consecutive LLM requests to avoid rate-limiting. */
+const LLM_REQUEST_DELAY_MS = Math.max(0, Number(process.env.LLM_REQUEST_DELAY_MS) || 4000);
+let lastLlmRequestTimestamp = 0;
+
+async function throttleLlmRequest(): Promise<void> {
+  if (LLM_REQUEST_DELAY_MS <= 0) {
+    return;
+  }
+
+  const now = Date.now();
+  const elapsed = now - lastLlmRequestTimestamp;
+
+  if (elapsed < LLM_REQUEST_DELAY_MS) {
+    await new Promise<void>((resolve) => setTimeout(resolve, LLM_REQUEST_DELAY_MS - elapsed));
+  }
+
+  lastLlmRequestTimestamp = Date.now();
+}
+
 export async function generateStructured<T>(options: {
   provider?: LlmProvider;
   model?: string;
@@ -217,6 +241,7 @@ export async function generateStructured<T>(options: {
   timeoutMs?: number;
   maxRetries?: number;
 }): Promise<T> {
+  await throttleLlmRequest();
   const runtime = resolveLlmRuntime({
     ...(options.provider ? { provider: options.provider } : {}),
     ...(options.model ? { model: options.model } : {}),

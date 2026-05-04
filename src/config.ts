@@ -44,6 +44,14 @@ function normalizeOptionalString(value: string | undefined): string | undefined 
   return trimmed ? trimmed : undefined;
 }
 
+function blankEnvToUndefined(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  return normalizeOptionalString(value);
+}
+
 function parseBooleanFlag(value: string | undefined, fallback: boolean): boolean {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
   if (!normalized) {
@@ -113,7 +121,10 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((value: string | undefined) => normalizeOptionalString(value)),
+  OPENAI_BASE_URL: z.preprocess(blankEnvToUndefined, z.string().url().optional()),
   OPENAI_MODEL: z.string().default("gpt-5"),
+  OPENAI_TEMPERATURE: z.preprocess(blankEnvToUndefined, z.coerce.number().min(0).max(2).optional()),
+  OPENAI_MAX_TOKENS: z.preprocess(blankEnvToUndefined, z.coerce.number().int().positive().optional()),
   OLLAMA_BASE_URL: z.string().url().default("http://127.0.0.1:11434"),
   OLLAMA_MODEL: z.string().default("llama3.1:8b"),
   APP_BASE_URL: z.string().optional(),
@@ -179,7 +190,10 @@ function resolveDefaultModel(provider: LlmProvider): string {
 export const config = {
   llmProvider: parsed.LLM_PROVIDER,
   openaiApiKey: parsed.OPENAI_API_KEY,
+  openaiBaseUrl: parsed.OPENAI_BASE_URL,
   openaiModel: parsed.OPENAI_MODEL,
+  openaiTemperature: parsed.OPENAI_TEMPERATURE,
+  openaiMaxTokens: parsed.OPENAI_MAX_TOKENS,
   ollamaBaseUrl: parsed.OLLAMA_BASE_URL,
   ollamaModel: parsed.OLLAMA_MODEL,
   model: resolveDefaultModel(parsed.LLM_PROVIDER),

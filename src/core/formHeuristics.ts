@@ -44,8 +44,6 @@ const EMAIL_FIELD_PATTERN = /\bemail\b|e-mail/i;
 const PASSWORD_CONFIRMATION_PATTERN = /\bconfirm\b|re[- ]?(?:enter|type)|repeat|again|verify/i;
 const TEST_CRYPTO_WALLET_ADDRESS = "0x1111111111111111111111111111111111111111";
 const TEST_BANK_ACCOUNT_NUMBER = "0123456789";
-const TEST_NAIRA_AMOUNT = "50000";
-const TEST_CRYPTO_AMOUNT = "0.01";
 
 function normalizeFormText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -369,16 +367,20 @@ export function inferFormFieldValue(field: FormFieldLike, identity: AuthIdentity
     return fitValueToField(field, TEST_BANK_ACCOUNT_NUMBER);
   }
 
+  if (/\b(?:token|contract)\b.*\baddress\b|\baddress\b.*\b(?:token|contract)\b/.test(key)) {
+    return null;
+  }
+
   if (/\bnaira\b|\bngn\b|₦/.test(key) && /\bamount\b|spend|pay|receive|payout/.test(key)) {
-    return fitValueToField(field, TEST_NAIRA_AMOUNT);
+    return null;
   }
 
   if (/\bcrypto\b|\btoken\b|\busdt\b|\bbtc\b|\beth\b|\busdc\b/.test(key) && /\bamount\b|sell|receive|send/.test(key)) {
-    return fitValueToField(field, TEST_CRYPTO_AMOUNT);
+    return null;
   }
 
   if (/\bamount\b/.test(key) && (field.inputType === "number" || field.inputMode === "numeric" || field.inputMode === "decimal")) {
-    return fitValueToField(field, TEST_NAIRA_AMOUNT);
+    return null;
   }
 
   if (field.inputType === "checkbox") {

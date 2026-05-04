@@ -54,6 +54,7 @@ User submits URL + tasks
 - **Supplemental audits** — SEO crawl, security headers, performance timings, accessibility (axe-core), CRO signals, content readability, mobile layout
 - **Activity replay** — compact animated WebP that overlays all recorded agent actions onto the captured click frames
 - **Exchange-flow QA** — safely tests Naira/crypto buy and sell flows with harmless values and stops before real transfers
+- **Paystack Integration** — provision dedicated virtual Naira accounts for agents and trigger outbound bank transfers
 - **Dual LLM support** — OpenAI (GPT-5) for production, Ollama for local/private development
 - **Two deployment modes** — CLI or web dashboard, including Render web service deployment
 
@@ -369,6 +370,33 @@ If you specifically need to test how a dApp interacts with the MetaMask UI, you 
 
 ---
 
+## Paystack Integration
+
+The agent has built-in support for the Paystack API (Nigeria) to handle Naira payments and payouts. This enables "Agent-as-a-Service" monetization flows.
+
+### Features
+- **Dedicated Virtual Accounts (DVA):** Automatically provisions a unique bank account number (Wema/GTB) for each agent persona.
+- **Naira Transfers:** Initiates outbound transfers to any Nigerian bank account via the Transfers API.
+- **Webhook Processing:** Securely handles `charge.success` and `transfer.success` events with HMAC-SHA512 verification.
+- **Zero-Dependency Client:** Uses Node 20+ native `fetch` (no `axios` required).
+
+### Quick Setup
+Configure Paystack in `.env`:
+```bash
+PAYSTACK_SECRET_KEY=sk_test_...
+PAYSTACK_PUBLIC_KEY=pk_test_...
+PAYSTACK_DVA_PROVIDER=wema-bank
+```
+
+### Testing the Integration
+Run the standalone smoke test to verify your API keys and DVA provisioning:
+```bash
+npm run paystack:test
+```
+
+---
+
+
 ## Configuration
 
 All settings are read from environment variables (`.env` file).
@@ -521,6 +549,7 @@ High-level summary:
 | **Authentication** | `auth/profile.ts`, `auth/inbox.ts`, `auth/runner.ts` | Identity management, IMAP OTP polling, login flows |
 | **Evaluation** | `evaluator.ts`, `aggregateReport.ts` | LLM scoring, multi-agent result merging |
 | **Site checks** | `siteChecks.ts`, `audit.ts` | SEO, performance, security, accessibility |
+| **Paystack** | `paystack/*` | Dedicated virtual accounts, Naira transfers, webhooks |
 | **Reporting** | `reporting/html.ts`, `reporting/markdown.ts`, `clickReplay.ts` | HTML/MD/JSON reports, activity replay animation |
 | **Trade safety** | `trade/*`, `wallet/*` | Wallet injection, deterministic trade extraction, policy validation, dry-run/broadcast records |
 | **LLM** | `llm/client.ts`, `prompts/browserAgent.ts`, `prompts/reviewer.ts` | OpenAI + Ollama client, system prompts |

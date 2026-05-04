@@ -15,7 +15,12 @@ const ACTION_WORD_PATTERN =
   "(?:click|tap|press|open|select|choose|copy|fill(?:\\s+(?:out|up|in))?|enter|type|input|provide|submit|create|register|sign\\s*up|signup|join|scroll|swipe|wait|pause|hold|go back|back|stop|halt)";
 
 function cleanDirectiveText(value: string): string {
-  return normalizeTaskText(value.replace(/^["'`]+|["'`]+$/g, "").replace(/[.?!,]+$/g, ""));
+  return normalizeTaskText(
+    value
+      .replace(/^["'`]+|["'`]+$/g, "")
+      .replace(/^(?:task|step)\s+\d+[:.)-]?\s*/i, "")
+      .replace(/[.?!,]+$/g, "")
+  );
 }
 
 function cleanDirectiveTarget(value: string): string {
@@ -37,7 +42,12 @@ function splitDirectiveSegments(taskText: string): string[] {
 
   return normalized
     .split(/[;]+/)
-    .map((segment) => segment.replace(/^(?:first|second|third|fourth|fifth)\b[:,]?\s*/i, "").trim())
+    .map((segment) =>
+      segment
+        .replace(/^(?:first|second|third|fourth|fifth)\b[:,]?\s*/i, "")
+        .replace(/^(?:task|step)\s+\d+[:.)-]?\s*/i, "")
+        .trim()
+    )
     .filter(Boolean);
 }
 

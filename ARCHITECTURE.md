@@ -17,9 +17,10 @@
 9. [Evaluation & Reporting](#evaluation--reporting)
 10. [Site Checks & Audits](#site-checks--audits)
 11. [Dashboard & Submissions](#dashboard--submissions)
-12. [Deployment Modes](#deployment-modes)
-13. [Directory Structure](#directory-structure)
-14. [Data Flow Summary](#data-flow-summary)
+12. [Paystack System](#paystack-system)
+13. [Deployment Modes](#deployment-modes)
+14. [Directory Structure](#directory-structure)
+15. [Data Flow Summary](#data-flow-summary)
 
 ---
 
@@ -466,6 +467,27 @@ queued → running → completed
 
 ---
 
+## Paystack System
+
+Site Agent Pro integrates with the Paystack API to provide automated Naira financial operations for agents.
+
+### Core Components (`src/paystack/`)
+
+| Module | Purpose |
+|---|---|
+| `client.ts` | Zero-dependency REST client using Node native `fetch`. Handles authentication and error normalization. |
+| `account.ts` | Manages Dedicated Virtual Accounts (DVA). Provisions real bank accounts for agent personas and caches them locally. |
+| `transfer.ts` | Orchestrates outbound bank transfers. Supports recipient registration and dry-run safety gates. |
+| `webhook.ts` | Signature-verified HTTP listener for Paystack events (`charge.success`, `transfer.success`). |
+| `test-paystack.ts` | Integration smoke-test for validating API keys and DVA connectivity. |
+
+### DVA Lifecycle
+1. Agent starts and checks for cached DVA in `SITE_AGENT_DATA_DIR/paystack/dva.json`.
+2. If missing, it creates/retrieves a Paystack Customer and requests a `dedicated_account`.
+3. Account details (Bank Name, Account Number) are stored and exposed in the dashboard for user payments.
+
+---
+
 ## Deployment Modes
 
 | Mode | Entry | Browser | Storage |
@@ -508,6 +530,15 @@ src/
 │   ├── profile.ts          #   Agent identity management
 │   ├── inbox.ts            #   IMAP email polling for OTP
 │   └── runner.ts           #   Full signup/login/OTP flow
+│
+├── paystack/               # Paystack integration (Naira)
+│   ├── index.ts            #   Barrel index
+│   ├── client.ts           #   Fetch-based API client
+│   ├── account.ts          #   DVA lifecycle management
+│   ├── transfer.ts         #   Naira payouts & transfers
+│   ├── webhook.ts          #   HMAC-signed webhook handler
+│   ├── types.ts            #   Zod schemas & TS types
+│   └── test-paystack.ts    #   Integration smoke test
 │
 ├── prompts/                # LLM system prompts
 │   ├── browserAgent.ts     #   Action planning prompt

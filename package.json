@@ -16,7 +16,8 @@
     "render:start": "node dist/dashboard/server.js",
     "format": "prettier --write .",
     "lint": "eslint .",
-    "browser:install": "playwright install chromium"
+    "browser:install": "playwright install chromium",
+    "paystack:test": "tsx src/paystack/test-paystack.ts"
   },
   "dependencies": {
     "@axe-core/playwright": "^4.11.1",

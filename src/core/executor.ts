@@ -1,4 +1,4 @@
-import type { Locator, Page } from "playwright";
+import type { Dialog, Locator, Page } from "playwright";
 import type { ClickIndicator, PlannerDecision } from "../schemas/types.js";
 import {
   findMatchingSelectOption,
@@ -55,6 +55,13 @@ export type PreparedClickAction = {
 type ExecuteDecisionOptions = {
   singleClickAttempt?: boolean;
 };
+
+type DialogResult = {
+  type: string;
+  message: string;
+  defaultValue: string;
+  action: "accepted" | "dismissed";
+} | null;
 
 const INTERSTITIAL_PATTERNS = [
   /just a moment/i,
@@ -801,6 +808,43 @@ async function waitForPostActionState(page: Page): Promise<VisibleState> {
   return readVisibleState(page);
 }
 
+function waitForClickDialog(page: Page): Promise<DialogResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      page.off("dialog", onDialog);
+      resolve(null);
+    }, 1500);
+
+    const onDialog = (dialog: Dialog): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeoutId);
+      const result = {
+        type: dialog.type(),
+        message: dialog.message(),
+        defaultValue: dialog.defaultValue(),
+        action: "accepted" as const
+      };
+
+      dialog.accept().then(
+        () => resolve(result),
+        () => resolve({ ...result, action: "dismissed" as const })
+      );
+    };
+
+    page.once("dialog", onDialog);
+  });
+}
+
 export async function executeDecision(
   page: Page,
   decision: PlannerDecision,
@@ -834,7 +878,9 @@ export async function executeDecision(
     if (decision.action === "wait") {
       const before = await readVisibleState(page);
       const startedAt = Date.now();
-      await page.waitForTimeout(1500);
+      const waitContext = `${decision.thought} ${decision.expectation} ${decision.target}`.toLowerCase();
+      const waitMs = /\b(?:transaction|tx|sending|pending|broadcast|confirm|confirmation|settle|receipt)\b/.test(waitContext) ? 5000 : 1500;
+      await page.waitForTimeout(waitMs);
       const after = await readVisibleState(page);
       const elapsedMs = Date.now() - startedAt;
       const { stateChanged, destinationLabel } = describeStateChange(
@@ -925,10 +971,12 @@ export async function executeDecision(
         preparedClickResolution.preparedClick.locator,
       );
       const startedAt = Date.now();
+      const dialogResultPromise = waitForClickDialog(page);
       const clickStrategy = await triggerLocatorClick(
         preparedClickResolution.preparedClick.locator,
         options.singleClickAttempt ? { singleAttempt: true } : {},
       );
+      const dialogResult = await dialogResultPromise;
       let after = await waitForPostActionState(page);
       let elapsedMs = Date.now() - startedAt;
       let { stateChanged, destinationLabel } = describeStateChange(
@@ -961,11 +1009,14 @@ export async function executeDecision(
       }
 
       const blockedByInterstitial = isInterstitialState(after);
+      const dialogNote = dialogResult
+        ? ` Accepted ${dialogResult.type} dialog${dialogResult.message ? `: ${truncateLabel(dialogResult.message, 140)}` : ""}.`
+        : "";
 
       if (blockedByInterstitial) {
         return {
           success: false,
-          note: `Clicked '${target || targetId}' and hit a security or verification interstitial after ${elapsedMs}ms`,
+          note: `Clicked '${target || targetId}' and hit a security or verification interstitial after ${elapsedMs}ms.${dialogNote}`,
           matchedBy: `${preparedClickResolution.preparedClick.matchedBy}:${clickStrategy}`,
           elapsedMs,
           destinationUrl: after.url,
@@ -982,15 +1033,17 @@ export async function executeDecision(
       }
 
       return {
-        success: stateChanged,
+        success: stateChanged || Boolean(dialogResult),
         note: stateChanged
-          ? `Clicked '${target || targetId}' and reached '${destinationLabel}' after ${elapsedMs}ms`
-          : `Clicked '${target || targetId}' but the page showed no clear visible change after ${elapsedMs}ms`,
+          ? `Clicked '${target || targetId}' and reached '${destinationLabel}' after ${elapsedMs}ms.${dialogNote}`
+          : dialogResult
+            ? `Clicked '${target || targetId}' and accepted a ${dialogResult.type} dialog after ${elapsedMs}ms${dialogResult.message ? `: ${truncateLabel(dialogResult.message, 140)}` : ""}`
+            : `Clicked '${target || targetId}' but the page showed no clear visible change after ${elapsedMs}ms`,
         matchedBy: `${preparedClickResolution.preparedClick.matchedBy}:${clickStrategy}`,
         elapsedMs,
         destinationUrl: after.url,
         destinationTitle: after.title,
-        stateChanged,
+        stateChanged: stateChanged || Boolean(dialogResult),
         visibleTextSnippet: after.textSnippet,
         ...(preparedClickResolution.preparedClick.clickIndicator
           ? {

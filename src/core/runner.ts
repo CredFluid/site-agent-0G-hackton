@@ -45,7 +45,7 @@ import { ensureDir, writeJson } from "../utils/files.js";
 import { debug, warn } from "../utils/log.js";
 import { installPlaywrightPageCompat } from "../utils/playwrightCompat.js";
 import { sleep } from "../utils/time.js";
-import { extractSellInstruction } from "../trade/extractor.js";
+import { extractSellInstruction, taskLooksLikeTrade } from "../trade/extractor.js";
 import { executeTradeInstruction } from "../trade/engine.js";
 import { getTradePolicy, buildDefaultTradeRunOptions } from "../trade/policy.js";
 import type {
@@ -1400,6 +1400,36 @@ function inferTaskStatus(
       status: "failed",
       reason: failedTrades[0]!.result.note
     };
+  }
+
+  const successfulRealTransactionClick = history.find(
+    (entry) =>
+      entry.decision.action === "click" &&
+      entry.result.success &&
+      /\bexecute\s+real\s+transaction\b/i.test(entry.decision.target || entry.decision.instructionQuote || "")
+  );
+  if (taskLooksLikeTrade(task.goal) && successfulRealTransactionClick) {
+    const transactionEvidence = collectTaskStrings(history, finalUrl, finalTitle, taskNotes).join(" ");
+    if (/\b(?:failed|reverted|rejected|denied|cancelled|canceled|error)\b/i.test(transactionEvidence)) {
+      return {
+        status: "failed",
+        reason: "The real transaction was submitted, but the visible transaction history reported a failed or rejected outcome."
+      };
+    }
+
+    if (/\b(?:succeeded|success|successful|confirmed|completed|broadcast)\b/i.test(transactionEvidence)) {
+      return {
+        status: "success",
+        reason: "The real transaction was submitted and the visible transaction history reached a final successful or broadcast state."
+      };
+    }
+
+    if (/\b(?:sending|pending|confirming|processing|submitted)\b/i.test(transactionEvidence)) {
+      return {
+        status: "partial_success",
+        reason: "The real transaction was submitted and accepted, but the page still showed it as pending before the run ended."
+      };
+    }
   }
 
   const taskProfile = classifyTaskText(task.goal);
