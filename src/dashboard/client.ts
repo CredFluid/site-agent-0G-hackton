@@ -1205,6 +1205,50 @@ function renderRunMetaPanel(detail: DashboardRunDetail): string {
   `;
 }
 
+function renderZGProofPanel(detail: DashboardRunDetail): string {
+  const proof = detail.report?.zgProof ?? detail.inputs?.zgProof;
+  if (!proof) {
+    return "";
+  }
+
+  const storageRoot = proof.storageRootHash ?? "Recorded in storage pointer";
+  const storageTx = proof.storageUploadTxHash ?? "Not returned by indexer";
+  const proofStatus = proof.status === "registered" ? "registered on-chain" : "submitted to chain";
+
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">0G Proof</div>
+          <div class="panel-sub">Evidence bundle stored on 0G Storage and ${escapeHtml(proofStatus)}</div>
+        </div>
+        <div class="panel-actions">
+          <a class="icon-btn" href="${escapeHtml(proof.explorerUrl)}" target="_blank" rel="noreferrer">↗ 0G Explorer</a>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="helper-row" style="margin-top: 0;">
+          <span>Run ${escapeHtml(proof.runId)}</span>
+          <span>Agent ${escapeHtml(proof.agentId)}</span>
+          <span>${escapeHtml(formatDate(proof.completedAt, detail.inputs?.synchronizedTimezone ?? null))}</span>
+        </div>
+        <div class="warning-note" style="margin-top: 12px;">
+          <strong>Artifact hash.</strong> <span class="mono">${escapeHtml(proof.artifactHash)}</span>
+        </div>
+        <div class="warning-note" style="margin-top: 12px;">
+          <strong>Storage pointer.</strong> <span class="mono">${escapeHtml(proof.storagePointer)}</span>
+        </div>
+        <div class="link-row">
+          <a class="inline-link" href="${escapeHtml(proof.explorerUrl)}" target="_blank" rel="noreferrer">Open registry transaction</a>
+          <span class="inline-link mono">${escapeHtml(proof.registryContractAddress)}</span>
+          <span class="inline-link mono">${escapeHtml(storageRoot)}</span>
+          <span class="inline-link mono">${escapeHtml(storageTx)}</span>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderDetailContent(detail: DashboardRunDetail): string {
   const recapParagraphs = buildVisitRecap(detail);
   const strengths = filterVisitorFacingItems(detail.report?.strengths ?? []);
@@ -1238,6 +1282,7 @@ function renderDetailContent(detail: DashboardRunDetail): string {
         </div>
 
         ${renderRunMetaPanel(detail)}
+        ${renderZGProofPanel(detail)}
 
         <section class="panel" id="output-details">
           <div class="panel-head">

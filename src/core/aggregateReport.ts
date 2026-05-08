@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs";
 import { config } from "../config.js";
 import { renderHtmlReport } from "../reporting/html.js";
 import { renderMarkdownReport } from "../reporting/markdown.js";
@@ -13,6 +14,7 @@ export type CompletedAgentAudit = {
   accessibility: AccessibilityResult;
   siteChecks: SiteChecks;
   runId: string;
+  runDir?: string;
 };
 
 type AggregateArtifacts = {
@@ -23,6 +25,32 @@ type AggregateArtifacts = {
   accessibility: AccessibilityResult;
   siteChecks: SiteChecks;
 };
+
+function copyAgentVideoArtifacts(runDir: string, results: CompletedAgentAudit[]): string[] {
+  const copiedArtifacts: string[] = [];
+
+  for (const result of results) {
+    if (!result.runDir || !fs.existsSync(result.runDir)) {
+      continue;
+    }
+
+    const videoFiles = fs
+      .readdirSync(result.runDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".webm"))
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right));
+
+    for (const videoFile of videoFiles) {
+      const sourcePath = path.join(result.runDir, videoFile);
+      const targetName = `${result.agentRun.id}-${videoFile}`;
+      const targetPath = path.join(runDir, targetName);
+      fs.copyFileSync(sourcePath, targetPath);
+      copiedArtifacts.push(targetName);
+    }
+  }
+
+  return copiedArtifacts;
+}
 
 const IMPACT_ORDER = ["minor", "moderate", "serious", "critical"];
 const COVERAGE_ORDER = ["blocked", "inferred", "verified"];
@@ -386,6 +414,7 @@ export function createAggregateRun(submission: Submission, results: CompletedAge
       : `${submission.agentCount}-agent task panel`;
   const { report, taskRuns, accessibility, siteChecks, rawEvents } = buildAggregateReport(submission, results);
   const timeZone = config.deviceTimezone;
+  const videoArtifacts = copyAgentVideoArtifacts(runDir, results);
   const inputs = {
     baseUrl: submission.url,
     persona: aggregatePersona,
@@ -411,6 +440,7 @@ export function createAggregateRun(submission: Submission, results: CompletedAge
     failedAgentCount: submission.failedAgentCount,
     customTasks: submission.customTasks,
     aggregatedFromRunIds: results.map((result) => result.runId),
+    videoArtifacts,
     agentRuns: submission.agentRuns.map((agentRun) => ({
       ...agentRun,
       runDir: null

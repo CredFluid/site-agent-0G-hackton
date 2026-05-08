@@ -9,6 +9,8 @@ import { renderHtmlReport } from "../reporting/html.js";
 import { renderMarkdownReport } from "../reporting/markdown.js";
 import type { TradeRunOptions } from "../trade/types.js";
 import { ensureDir, resolveRunDir, writeJson, writeText } from "../utils/files.js";
+import { info } from "../utils/log.js";
+import { createAndRegisterZGProof } from "../zerog/proof.js";
 
 function summarizeSessionPath(filePath: string): string {
   const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath);
@@ -16,6 +18,33 @@ function summarizeSessionPath(filePath: string): string {
   return relativePath && relativePath !== "" && !relativePath.startsWith("..")
     ? relativePath
     : path.basename(resolvedPath);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s.`));
+    }, timeoutMs);
+  });
+
+  promise.catch(() => undefined);
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function logZGProofExplorer(runId: string, explorerUrl: string, late = false): void {
+  process.stdout.write(`[0G proof] ${runId} ${late ? "late " : ""}explorer: ${explorerUrl}\n`);
+}
+
+function formatElapsed(startedAtMs: number): string {
+  return `${((Date.now() - startedAtMs) / 1000).toFixed(1)}s`;
 }
 
 export async function runAuditJob(options: {
@@ -51,6 +80,7 @@ export async function runAuditJob(options: {
     const suite = options.suiteOverride;
     const runDir = options.runDir ?? resolveRunDir(options.baseUrl);
     ensureDir(runDir);
+    const runId = path.basename(runDir);
     const inputsPath = path.join(runDir, "inputs.json");
     const startedAt = new Date().toISOString();
     const startedAtMs = Date.now();
@@ -97,6 +127,7 @@ export async function runAuditJob(options: {
     };
 
     writeJson(inputsPath, baseInputs);
+    info(`Run ${runId}: initialized artifacts directory`);
 
     const execution = await runTaskSuite({
       baseUrl: options.baseUrl,
@@ -113,6 +144,7 @@ export async function runAuditJob(options: {
       model: llmRuntime.model,
       ollamaBaseUrl: llmRuntime.ollamaBaseUrl
     });
+    info(`Run ${runId}: browser execution completed in ${formatElapsed(startedAtMs)}`);
 
     let clickReplayArtifact: string | null = null;
     let clickReplayFrameCount: number | null = null;
@@ -126,11 +158,17 @@ export async function runAuditJob(options: {
       clickReplayArtifact = clickReplay?.artifactName ?? null;
       clickReplayFrameCount = clickReplay?.frameCount ?? null;
       clickReplayDurationMs = clickReplay?.durationMs ?? null;
+      info(
+        clickReplayArtifact
+          ? `Run ${runId}: click replay generated (${clickReplayFrameCount ?? 0} frames)`
+          : `Run ${runId}: click replay skipped because no replay frames were available`
+      );
     } catch {
       // Replay generation is optional and should never block the main report.
+      info(`Run ${runId}: click replay skipped after a non-blocking generation error`);
     }
 
-    writeJson(inputsPath, {
+    let finalInputs: Record<string, unknown> = {
       ...baseInputs,
       ...(execution.siteBrief ? { siteBrief: execution.siteBrief } : {}),
       browserTimezone: execution.browserTimezone,
@@ -138,10 +176,12 @@ export async function runAuditJob(options: {
       ...(clickReplayArtifact ? { clickReplayArtifact } : {}),
       ...(clickReplayFrameCount !== null ? { clickReplayFrameCount } : {}),
       ...(clickReplayDurationMs !== null ? { clickReplayDurationMs } : {})
-    });
+    };
+
+    writeJson(inputsPath, finalInputs);
 
     const remainingEvaluationBudgetMs = Math.max(0, maxRunDurationMs - (Date.now() - startedAtMs));
-    const report = await evaluateRun({
+    let report = await evaluateRun({
       baseUrl: options.baseUrl,
       suite,
       siteBrief: execution.siteBrief,
@@ -159,6 +199,97 @@ export async function runAuditJob(options: {
     });
 
     writeJson(path.join(runDir, "report.json"), report);
+    info(`Run ${runId}: model evaluation completed in ${formatElapsed(startedAtMs)}`);
+
+    const persistZGProof = (zgProof: NonNullable<Awaited<ReturnType<typeof createAndRegisterZGProof>>>): void => {
+      report = {
+        ...report,
+        zgProof
+      };
+      finalInputs = {
+        ...finalInputs,
+        zgProof,
+        zgProofError: undefined,
+        zgProofPending: undefined
+      };
+      writeJson(path.join(runDir, "report.json"), report);
+      writeJson(inputsPath, finalInputs);
+      writeText(
+        path.join(runDir, "report.html"),
+        renderHtmlReport({
+          website: options.baseUrl,
+          persona: suite.persona.name,
+          acceptedTasks: suite.tasks.map((task) => task.goal),
+          instructionText,
+          report,
+          taskResults: execution.taskResults,
+          accessibility: execution.accessibility,
+          siteChecks: execution.siteChecks,
+          siteBrief: execution.siteBrief,
+          rawEvents: execution.rawEvents,
+          runId: path.basename(runDir),
+          startedAt,
+          mobile: Boolean(options.mobile),
+          timeZone: execution.browserTimezone || execution.deviceTimezone,
+          clickReplayArtifact
+        })
+      );
+    };
+
+    try {
+      const completedAt = new Date().toISOString();
+      const proofPromise = createAndRegisterZGProof({
+        runDir,
+        runId,
+        targetUrl: options.baseUrl,
+        tasks: suite.tasks.map((task) => task.goal),
+        overallScore: report.overall_score,
+        agentId:
+          typeof options.extraInputs?.agentRunId === "string"
+            ? options.extraInputs.agentRunId
+            : typeof options.extraInputs?.agentLabel === "string"
+              ? options.extraInputs.agentLabel
+              : accessIdentityName,
+        completedAt
+      });
+      let proofLogged = false;
+      proofPromise
+        .then((lateProof) => {
+          if (lateProof && !proofLogged) {
+            proofLogged = true;
+            logZGProofExplorer(runId, lateProof.explorerUrl, true);
+            persistZGProof(lateProof);
+          }
+        })
+        .catch(() => undefined);
+
+      const zgProof = await withTimeout(
+        proofPromise,
+        config.zgProofTimeoutMs,
+        "0G proof"
+      );
+
+      if (zgProof) {
+        if (!proofLogged) {
+          proofLogged = true;
+          logZGProofExplorer(runId, zgProof.explorerUrl);
+        }
+        persistZGProof(zgProof);
+        info(`Run ${runId}: 0G proof artifact saved`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const proofMayStillComplete = /timed out/i.test(message);
+      process.stderr.write(
+        `[0G proof] ${path.basename(runDir)}: ${message}${proofMayStillComplete ? " Waiting in background for a late explorer URL.\n" : "\n"}`
+      );
+      finalInputs = {
+        ...finalInputs,
+        ...(proofMayStillComplete ? { zgProofPending: message } : { zgProofError: message })
+      };
+      writeJson(inputsPath, finalInputs);
+    }
+
     writeText(
       path.join(runDir, "report.html"),
       renderHtmlReport({
@@ -179,6 +310,7 @@ export async function runAuditJob(options: {
         clickReplayArtifact
       })
     );
+    info(`Run ${runId}: HTML report written`);
     writeText(
       path.join(runDir, "report.md"),
       renderMarkdownReport({
@@ -197,6 +329,7 @@ export async function runAuditJob(options: {
         timeZone: execution.browserTimezone || execution.deviceTimezone
       })
     );
+    info(`Run ${runId}: Markdown report written`);
 
     return {
       startedAt,

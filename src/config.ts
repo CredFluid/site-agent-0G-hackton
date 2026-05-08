@@ -13,7 +13,7 @@ export const MIN_REPORTING_RESERVE_MS = 15000;
 export const MAX_REPORTING_RESERVE_MS = 45000;
 export const POST_RUN_AUDIT_RESERVE_MS = 45000;
 export const DETECTED_DEVICE_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-export const LlmProviderSchema = z.enum(["openai", "ollama"]);
+export const LlmProviderSchema = z.enum(["openai", "ollama", "0g"]);
 export type LlmProvider = z.infer<typeof LlmProviderSchema>;
 
 export function clampRunDurationMs(value: number): number {
@@ -127,6 +127,9 @@ const EnvSchema = z.object({
   OPENAI_MAX_TOKENS: z.preprocess(blankEnvToUndefined, z.coerce.number().int().positive().optional()),
   OLLAMA_BASE_URL: z.string().url().default("http://127.0.0.1:11434"),
   OLLAMA_MODEL: z.string().default("llama3.1:8b"),
+  ZG_INFERENCE_BASE_URL: z.preprocess(blankEnvToUndefined, z.string().url().optional()),
+  ZG_INFERENCE_API_KEY: z.preprocess(blankEnvToUndefined, z.string().optional()),
+  ZG_PROOF_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
   APP_BASE_URL: z.string().optional(),
   HEADLESS: z
     .string()
@@ -184,18 +187,21 @@ const tradePolicy: TradePolicy = TradePolicySchema.parse({
 });
 
 function resolveDefaultModel(provider: LlmProvider): string {
-  return provider === "ollama" ? parsed.OLLAMA_MODEL : parsed.OPENAI_MODEL;
+  if (provider === "ollama") return parsed.OLLAMA_MODEL;
+  if (provider === "0g") return "qwen3.6-plus";
+  return parsed.OPENAI_MODEL;
 }
 
 export const config = {
   llmProvider: parsed.LLM_PROVIDER,
-  openaiApiKey: parsed.OPENAI_API_KEY,
-  openaiBaseUrl: parsed.OPENAI_BASE_URL,
+  openaiApiKey: parsed.LLM_PROVIDER === "0g" ? parsed.ZG_INFERENCE_API_KEY : parsed.OPENAI_API_KEY,
+  openaiBaseUrl: parsed.LLM_PROVIDER === "0g" ? parsed.ZG_INFERENCE_BASE_URL : parsed.OPENAI_BASE_URL,
   openaiModel: parsed.OPENAI_MODEL,
   openaiTemperature: parsed.OPENAI_TEMPERATURE,
   openaiMaxTokens: parsed.OPENAI_MAX_TOKENS,
   ollamaBaseUrl: parsed.OLLAMA_BASE_URL,
   ollamaModel: parsed.OLLAMA_MODEL,
+  zgProofTimeoutMs: parsed.ZG_PROOF_TIMEOUT_MS,
   model: resolveDefaultModel(parsed.LLM_PROVIDER),
   appBaseUrl: resolvedAppBaseUrl,
   headless: parsed.HEADLESS,
@@ -228,7 +234,7 @@ export function resolveLlmRuntime(options?: {
   const provider = options?.provider ?? config.llmProvider;
   const model =
     normalizeOptionalString(options?.model) ??
-    (provider === "ollama" ? config.ollamaModel : config.openaiModel);
+    (provider === "ollama" ? config.ollamaModel : config.model);
   const ollamaBaseUrl = normalizeOptionalString(options?.ollamaBaseUrl) ?? config.ollamaBaseUrl;
 
   return {

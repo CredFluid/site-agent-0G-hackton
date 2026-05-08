@@ -10,7 +10,7 @@ export type LlmRuntimeOptions = {
 
 function getOpenAIClient(): OpenAI {
   if (!config.openaiApiKey) {
-    throw new Error("OPENAI_API_KEY is required when the selected LLM provider is openai.");
+    throw new Error(`${config.llmProvider.toUpperCase()}_API_KEY is required.`);
   }
 
   return new OpenAI({

@@ -10,6 +10,7 @@
     "start": "node dist/cli/run.js",
     "dev": "tsx src/cli/run.ts",
     "trade:run": "tsx src/cli/trade.ts",
+    "zerog:deploy-registry": "tsx src/cli/deployZgRegistry.ts",
     "backfill:site-checks": "tsx src/cli/backfillSiteChecks.ts",
     "dashboard": "tsx src/dashboard/server.ts",
     "dashboard:start": "node dist/dashboard/server.js",
@@ -20,11 +21,12 @@
     "paystack:test": "tsx src/paystack/test-paystack.ts"
   },
   "dependencies": {
+    "@0gfoundation/0g-storage-ts-sdk": "^1.2.9",
     "@axe-core/playwright": "^4.11.1",
     "@sparticuz/chromium": "^143.0.4",
     "commander": "^14.0.3",
     "dotenv": "^17.2.1",
-    "ethers": "^6.16.0",
+    "ethers": "^6.13.1",
     "imapflow": "^1.3.1",
     "mailparser": "^3.9.8",
     "node-webpmux": "^3.2.1",

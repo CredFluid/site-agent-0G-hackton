@@ -2,7 +2,9 @@
 
 > AI-powered browser agent that executes real user tasks on any website, captures step-by-step evidence, and produces scored, actionable reports.
 
-**Playwright** · **OpenAI / Ollama** · **axe-core** · **TypeScript** · **Zod**
+**Playwright** · **OpenAI / Ollama / 0G Compute** · **axe-core** · **TypeScript** · **0G Storage & Chain** · **Zod**
+
+Site Agent Pro is an AI browser agent that verifies website user flows, records evidence, and anchors audit proofs on 0G Storage and Chain.
 
 ---
 
@@ -38,8 +40,21 @@ User submits URL + tasks
 │  → Scored report (1-10)      │
 │  → HTML / Markdown / JSON    │
 │  → Activity replay animation │
+└──────────┬──────────────────┘
+           ▼
+┌─────────────────────────────┐
+│  0G Network Integration      │
+│  → Plan/evaluate via 0G AI   │
+│  → Persist to 0G Storage     │
+│  → Anchor Proof on 0G Chain  │
 └─────────────────────────────┘
 ```
+
+**Verifying 0G Activity:**
+- **0G Compute:** Set `LLM_PROVIDER=0g` to route planner/evaluator calls through the 0G inference endpoint.
+- **On-Chain Audit:** Enable `ZG_PROOF_ENABLED=true` to upload audit evidence to 0G Storage and anchor the run's proof to the 0G Chain.
+- **Registry:** Deploy `ZGAuditRegistry` once with `npm run zerog:deploy-registry`, then set `ZG_AUDIT_REGISTRY_ADDRESS` so future runs reuse the same proof registry.
+- **Explorer:** Check `0g-proof.json` in the child agent run directory for the registry transaction explorer link.
 
 ---
 
@@ -55,7 +70,8 @@ User submits URL + tasks
 - **Activity replay** — compact animated WebP that overlays all recorded agent actions onto the captured click frames
 - **Exchange-flow QA** — safely tests Naira/crypto buy and sell flows with harmless values and stops before real transfers
 - **Paystack Integration** — provision dedicated virtual Naira accounts for agents and trigger outbound bank transfers
-- **Dual LLM support** — OpenAI (GPT-5) for production, Ollama for local/private development
+- **0G Network Integration** — decentralized artifact persistence (0G Storage), on-chain audit proofs (0G Chain), and optional 0G Compute inference
+- **Triple LLM support** — OpenAI (GPT-5) for production, Ollama for local development, and 0G for decentralized GPU inference
 - **Two deployment modes** — CLI or web dashboard, including Render web service deployment
 
 ---
@@ -82,10 +98,59 @@ Set your LLM provider in `.env`:
 LLM_PROVIDER=openai
 OPENAI_API_KEY=your_key_here
 
-# Option B: Ollama (for local/private development)
+# Option B: 0G Network (decentralized GPU inference)
+LLM_PROVIDER=0g
+ZG_INFERENCE_BASE_URL=https://router-api.0g.ai/v1
+ZG_INFERENCE_API_KEY=your_key_here
+OPENAI_MODEL=qwen3.6-plus  # Recommended for agentic tasks
+
+# Option C: Ollama (for local/private development)
 LLM_PROVIDER=ollama
 OLLAMA_MODEL=llama3.1:8b
 ```
+
+Optional 0G audit proofs:
+
+```bash
+# Uses ZG_CHAIN_RPC_URL and ZG_PRIVATE_KEY or WALLET_PRIVATE_KEY from .env
+npm run zerog:deploy-registry
+```
+
+Copy the printed registry address into `.env`:
+
+```bash
+ZG_PROOF_ENABLED=true
+ZG_NETWORK=galileo
+ZG_CHAIN_RPC_URL=https://evmrpc-testnet.0g.ai
+ZG_STORAGE_INDEXER_RPC=https://indexer-storage-testnet-turbo.0g.ai
+ZG_AUDIT_REGISTRY_ADDRESS=0xYourDeployedRegistryAddress
+ZG_EXPLORER_URL=https://chainscan-galileo.0g.ai
+ZG_PROOF_TIMEOUT_MS=120000
+```
+
+For HackQuest mainnet submissions, switch the proof network before deploying the registry:
+
+```bash
+ZG_PROOF_ENABLED=true
+ZG_NETWORK=mainnet
+ZG_CHAIN_RPC_URL=https://evmrpc.0g.ai
+ZG_STORAGE_INDEXER_RPC=<mainnet-storage-indexer-rpc-url>
+ZG_EXPLORER_URL=https://chainscan.0g.ai
+```
+
+`ZG_NETWORK=mainnet` refuses testnet RPC, storage indexer, or explorer URLs so the generated contract address and explorer link are suitable for mainnet-only submission requirements. Deploy `ZGAuditRegistry` again after switching networks, then use the new mainnet `ZG_AUDIT_REGISTRY_ADDRESS` for the final proof run.
+
+The project uses the official `@0gfoundation/0g-storage-ts-sdk` package for 0G Storage uploads and `ethers@6.13.1`, which is the SDK's expected peer version. 0G proof registration is optional and time-bounded by `ZG_PROOF_TIMEOUT_MS`, so a slow storage or chain request cannot keep the audit submission running after the browser work and report evaluation finish.
+
+### HackQuest Mainnet Proof
+
+The current mainnet proof configuration uses:
+
+- 0G mainnet registry contract: `0x53feA0506836077C2508a27B529212cA76529dce`
+- Example 0G Explorer transaction: `https://chainscan.0g.ai/tx/0xcf3a5b28969255d1314244c5269fc53306792b9a8c855611f91c60637a334853`
+- 0G components: 0G Compute for inference, 0G Storage for evidence bundles, and 0G Chain for proof registration.
+
+For a fresh submission proof, run the agent with `ZG_NETWORK=mainnet` and use the newest child run's `0g-proof.json`. Aggregate run directories summarize multi-agent output; the child run contains the on-chain proof artifact.
 
 ### 3. Run
 
@@ -110,6 +175,8 @@ Artifacts are saved to `runs/<run-id>/`:
 | `report.md` | Markdown report |
 | `task-results.json` | Per-task step history and outcomes |
 | `raw-events.json` | Every browser event, console log, and network request |
+| `0g-proof.json` | **0G Chain** proof-of-audit, registry transaction, explorer URL, and **0G Storage** root hashes |
+| `0g-proof-bundle.json` | Hash-addressed evidence bundle uploaded to 0G Storage; JSON evidence is embedded and large media is anchored by hash |
 | `accessibility.json` | axe-core violation list |
 | `site-checks.json` | SEO, performance, security, CRO, content, mobile checks |
 | `click-replay.webp` | Compact animated activity replay with click screenshots and overlays for all recorded actions |
@@ -165,7 +232,7 @@ npm run dev -- --url https://example-dapp.test \
 | `--headed` | Run browser in headed (visible) mode |
 | `--mobile` | Use iPhone 13 mobile viewport |
 | `--ignore-https-errors` | Allow invalid or self-signed HTTPS certificates |
-| `--llm-provider <name>` | LLM provider: `openai` or `ollama` |
+| `--llm-provider <name>` | LLM provider override: `openai` or `ollama`; use `.env` for `LLM_PROVIDER=0g` |
 | `--model <name>` | Override the model name |
 | `--ollama-base-url <url>` | Override the Ollama endpoint |
 | `--storage-state <path>` | Load Playwright storage state JSON before the run |
@@ -405,7 +472,7 @@ All settings are read from environment variables (`.env` file).
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_PROVIDER` | `openai` | LLM backend: `openai` or `ollama` |
+| `LLM_PROVIDER` | `openai` | LLM backend: `openai`, `ollama`, or `0g` |
 | `OPENAI_API_KEY` | — | **(Required for OpenAI)** API key |
 | `OPENAI_MODEL` | `gpt-5` | Model for planning and evaluation |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama server URL |
@@ -442,6 +509,21 @@ All settings are read from environment variables (`.env` file).
 | `TRADE_REQUIRE_EXACT_TOKEN_CONTRACT` | `true` | Require ERC-20 contract matches when validating trades |
 | `TRADE_CONFIRMATIONS_REQUIRED` | `1` | Default confirmations to wait for, 0–12 |
 | `TRADE_RECEIPT_TIMEOUT_MS` | `120000` | Max wait time for transaction receipt/confirmation |
+
+### 0G Network
+
+| Variable | Default | Description |
+|---|---|---|
+| `ZG_INFERENCE_BASE_URL` | — | 0G inference API base URL when `LLM_PROVIDER=0g` |
+| `ZG_INFERENCE_API_KEY` | — | 0G inference API key |
+| `ZG_PROOF_ENABLED` | `false` | Enable 0G Storage upload and on-chain proof registration |
+| `ZG_NETWORK` | `galileo` | 0G proof network: `galileo` for testnet or `mainnet` for HackQuest submission proofs |
+| `ZG_PRIVATE_KEY` | `WALLET_PRIVATE_KEY` fallback | Wallet key used to pay 0G Storage and registry transactions |
+| `ZG_CHAIN_RPC_URL` | `https://evmrpc-testnet.0g.ai` | 0G chain RPC endpoint |
+| `ZG_STORAGE_INDEXER_RPC` | `https://indexer-storage-testnet-turbo.0g.ai` | 0G Storage indexer endpoint |
+| `ZG_AUDIT_REGISTRY_ADDRESS` | — | Deployed `ZGAuditRegistry` address. Run `npm run zerog:deploy-registry` once to get it. |
+| `ZG_EXPLORER_URL` | `https://chainscan-galileo.0g.ai` | Explorer base URL used to build transaction links |
+| `ZG_PROOF_TIMEOUT_MS` | `120000` | Max wait time for optional 0G upload and proof registration before the run continues without a proof |
 
 ### Dashboard & Deployment
 
@@ -525,7 +607,7 @@ The repo root includes a Render Blueprint with:
 
 | Variable | Description |
 |---|---|
-| `LLM_PROVIDER` | Use `openai` for a single-service Render deployment unless you are also hosting Ollama separately |
+| `LLM_PROVIDER` | Use `openai` or `0g` for a single-service Render deployment unless you are also hosting Ollama separately |
 | `APP_BASE_URL` | Optional. If unset on Render, the app falls back to `RENDER_EXTERNAL_URL` |
 | `SITE_AGENT_DATA_DIR` | Override only if you change the disk mount path from the default in `render.yaml` |
 | `INTERNAL_JOB_SECRET` | Optional hardening for internal job-style routes |
@@ -550,9 +632,10 @@ High-level summary:
 | **Evaluation** | `evaluator.ts`, `aggregateReport.ts` | LLM scoring, multi-agent result merging |
 | **Site checks** | `siteChecks.ts`, `audit.ts` | SEO, performance, security, accessibility |
 | **Paystack** | `paystack/*` | Dedicated virtual accounts, Naira transfers, webhooks |
+| **0G Network** | `zerog/*`, `llm/client.ts` | 0G Compute inference, decentralized storage, and on-chain proof registration |
 | **Reporting** | `reporting/html.ts`, `reporting/markdown.ts`, `clickReplay.ts` | HTML/MD/JSON reports, activity replay animation |
 | **Trade safety** | `trade/*`, `wallet/*` | Wallet injection, deterministic trade extraction, policy validation, dry-run/broadcast records |
-| **LLM** | `llm/client.ts`, `prompts/browserAgent.ts`, `prompts/reviewer.ts` | OpenAI + Ollama client, system prompts |
+| **LLM** | `llm/client.ts`, `prompts/browserAgent.ts`, `prompts/reviewer.ts` | OpenAI-compatible, 0G, and Ollama client, system prompts |
 
 ---
 

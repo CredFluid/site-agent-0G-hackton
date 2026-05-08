@@ -1,6 +1,6 @@
-# Site Agent — Architecture Guide
+# Site Agent Pro — Architecture Guide
 
-> An AI-powered browser automation agent that executes user-defined tasks on websites, captures evidence of every interaction, and generates scored reports with actionable findings.
+> An AI-powered browser automation agent that executes user-defined tasks on websites, captures evidence of every interaction, generates scored reports, and anchors audit proofs on 0G.
 
 ---
 
@@ -17,25 +17,27 @@
 9. [Evaluation & Reporting](#evaluation--reporting)
 10. [Site Checks & Audits](#site-checks--audits)
 11. [Dashboard & Submissions](#dashboard--submissions)
-12. [Paystack System](#paystack-system)
-13. [Deployment Modes](#deployment-modes)
-14. [Directory Structure](#directory-structure)
-15. [Data Flow Summary](#data-flow-summary)
+12. [0G Proof System](#0g-proof-system)
+13. [Paystack System](#paystack-system)
+14. [Deployment Modes](#deployment-modes)
+15. [Directory Structure](#directory-structure)
+16. [Data Flow Summary](#data-flow-summary)
 
 ---
 
 ## System Overview
 
-Site Agent is a **browser automation system** that:
+Site Agent Pro is a **browser automation and audit-proof system** that:
 
 1. Accepts a **website URL** and a list of **user-defined tasks** (e.g., "Click the Sign Up Free tab and fill up every visible detail and submit")
 2. Launches a **Playwright-controlled Chromium browser**
-3. Uses an **LLM (GPT-5 or Ollama)** to plan each action step-by-step based on the live page state
+3. Uses an **LLM (OpenAI, Ollama, or 0G Compute)** to plan each action step-by-step based on the live page state
 4. **Executes** each action (click, type, scroll, etc.) against the real browser
 5. Captures **screenshots**, **page state**, and **interaction history** as evidence
 6. Runs **supplemental site checks** (SEO, performance, security, accessibility)
 7. Generates a **scored report** (1-10) with strengths, weaknesses, and fix recommendations
-8. Serves reports via a **web dashboard** or exports as HTML/Markdown/JSON
+8. Stores a compact evidence bundle in **0G Storage** and registers a proof on **0G Chain**
+9. Serves reports via a **web dashboard** or exports as HTML/Markdown/JSON
 
 ---
 
@@ -89,6 +91,13 @@ Site Agent is a **browser automation system** that:
 │  │  │  evaluator.ts → LLM scores the run (1-10)            │    │   │
 │  │  │  reporting/   → HTML, Markdown, JSON reports          │    │   │
 │  │  │  aggregateReport.ts → merges multi-agent results      │    │   │
+│  │  └──────────────────────────────────────────────────────┘    │   │
+│  │                      │                                       │   │
+│  │                      ▼                                       │   │
+│  │  ┌──────────────────────────────────────────────────────┐    │   │
+│  │  │                 0G PROOF LAYER                        │    │   │
+│  │  │  zerog/proof.ts → bundle evidence, upload to 0G       │    │   │
+│  │  │  Storage, register tx on 0G Chain, emit explorer URL  │    │   │
 │  │  └──────────────────────────────────────────────────────┘    │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
@@ -156,6 +165,7 @@ flowchart TD
     P --> Q["runAccessibilityAudit()"]
     Q --> R["evaluateRun()<br/>(LLM Reviewer)"]
     R --> S["Generate Reports<br/>(HTML + MD + JSON)"]
+    S --> T["0G Proof<br/>(Storage + Chain tx)"]
 ```
 
 ---
@@ -170,7 +180,7 @@ sequenceDiagram
     participant PS as PageState
     participant TD as TaskDirectives
     participant P as Planner
-    participant LLM as LLM (GPT-5)
+    participant LLM as LLM (OpenAI/Ollama/0G)
     participant E as Executor
     participant PW as Playwright
 
@@ -467,6 +477,28 @@ queued → running → completed
 
 ---
 
+## 0G Proof System
+
+Site Agent Pro uses 0G in three places:
+
+| Component | Project Use |
+|---|---|
+| **0G Compute** | Optional planner and evaluator inference when `LLM_PROVIDER=0g` and `ZG_INFERENCE_BASE_URL` are configured. |
+| **0G Storage** | Stores a compact proof bundle containing JSON evidence and hashes for larger media artifacts. |
+| **0G Chain** | Registers the evidence bundle hash, task hash, target URL hash, score, and storage pointer through `ZGAuditRegistry`. |
+
+### Proof Lifecycle
+
+1. `runAuditJob()` finishes browser execution and report evaluation.
+2. `zerog/proof.ts` writes `0g-proof-bundle.json`.
+3. The bundle is uploaded to 0G Storage using `@0gfoundation/0g-storage-ts-sdk`.
+4. `ZGAuditRegistry.registerProof(...)` anchors the proof on 0G Chain.
+5. The child run receives `0g-proof.json` with the registry contract address, storage pointer, transaction hash, and explorer URL.
+
+Aggregate runs summarize child runs. The child run contains the canonical on-chain proof artifact; aggregate directories copy child video artifacts for easier manual review.
+
+---
+
 ## Paystack System
 
 Site Agent Pro integrates with the Paystack API to provide automated Naira financial operations for agents.
@@ -482,6 +514,7 @@ Site Agent Pro integrates with the Paystack API to provide automated Naira finan
 | `test-paystack.ts` | Integration smoke-test for validating API keys and DVA connectivity. |
 
 ### DVA Lifecycle
+
 1. Agent starts and checks for cached DVA in `SITE_AGENT_DATA_DIR/paystack/dva.json`.
 2. If missing, it creates/retrieves a Paystack Customer and requests a `dedicated_account`.
 3. Account details (Bank Name, Account Number) are stored and exposed in the dashboard for user payments.
@@ -532,20 +565,19 @@ src/
 │   └── runner.ts           #   Full signup/login/OTP flow
 │
 ├── paystack/               # Paystack integration (Naira)
-│   ├── index.ts            #   Barrel index
-│   ├── client.ts           #   Fetch-based API client
-│   ├── account.ts          #   DVA lifecycle management
-│   ├── transfer.ts         #   Naira payouts & transfers
-│   ├── webhook.ts          #   HMAC-signed webhook handler
-│   ├── types.ts            #   Zod schemas & TS types
-│   └── test-paystack.ts    #   Integration smoke test
+│   └── ...
+│
+├── zerog/                  # 0G Storage + 0G Chain proof integration
+│   ├── proof.ts            #   Evidence bundle upload and registry transaction
+│   ├── network.ts          #   Mainnet/testnet endpoint resolution
+│   └── registryArtifact.ts #   ZGAuditRegistry ABI/bytecode
 │
 ├── prompts/                # LLM system prompts
 │   ├── browserAgent.ts     #   Action planning prompt
 │   └── reviewer.ts         #   Report evaluation prompt
 │
 ├── llm/                    # LLM client abstraction
-│   └── client.ts           #   OpenAI + Ollama structured output
+│   └── client.ts           #   OpenAI-compatible, 0G, and Ollama structured output
 │
 ├── schemas/                # Zod schemas & TypeScript types
 │   └── types.ts            #   Shared type definitions
@@ -624,8 +656,11 @@ flowchart LR
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `LLM_PROVIDER` | `openai` | LLM backend (`openai` or `ollama`) |
+| `LLM_PROVIDER` | `openai` | LLM backend (`openai`, `ollama`, or `0g`) |
 | `OPENAI_MODEL` | `gpt-5` | Model for planning & evaluation |
+| `ZG_INFERENCE_BASE_URL` | — | 0G inference endpoint when `LLM_PROVIDER=0g` |
+| `ZG_PROOF_ENABLED` | `false` | Enables 0G Storage upload and 0G Chain proof registration |
+| `ZG_NETWORK` | `galileo` | `mainnet` for HackQuest proof submissions |
 | `MAX_SESSION_DURATION_MS` | `600000` (10 min) | Total run time budget |
 | `MAX_STEPS_PER_TASK` | `32` | Maximum actions per task |
 | `ACTION_DELAY_MS` | `600` | Pause between actions (human-like) |

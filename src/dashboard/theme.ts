@@ -833,6 +833,10 @@ export const DASHBOARD_CSS = String.raw`
     font-weight: 500;
   }
   .inline-link:hover { text-decoration: underline; }
+  .mono {
+    font-family: var(--font-mono);
+    overflow-wrap: anywhere;
+  }
 
   .warning-note, .empty-stack {
     border: 1px dashed var(--border2);

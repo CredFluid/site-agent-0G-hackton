@@ -367,6 +367,24 @@ export const GameplaySummarySchema = z.object({
   evidence: z.array(z.string()).default([])
 });
 
+export const ZGProofSchema = z.object({
+  status: z.enum(["submitted", "registered"]),
+  runId: z.string(),
+  targetUrlHash: z.string(),
+  taskSetHash: z.string(),
+  artifactHash: z.string(),
+  storagePointer: z.string(),
+  storageRootHash: z.string().nullable().default(null),
+  storageUploadTxHash: z.string().nullable().default(null),
+  registryTxHash: z.string(),
+  registryContractAddress: z.string(),
+  explorerUrl: z.string(),
+  agentId: z.string(),
+  completedAt: z.string(),
+  bundleArtifact: z.string(),
+  confirmationNote: z.string().optional()
+});
+
 export const FinalReportSchema = z.object({
   overall_score: TenPointScoreSchema,
   summary: z.string(),
@@ -389,7 +407,8 @@ export const FinalReportSchema = z.object({
     })
   ),
   top_fixes: z.array(z.string()),
-  gameplay_summary: GameplaySummarySchema.optional()
+  gameplay_summary: GameplaySummarySchema.optional(),
+  zgProof: ZGProofSchema.optional()
 });
 
 export type PlannerDecision = z.infer<typeof PlannerDecisionSchema>;
@@ -403,6 +422,7 @@ export type CoverageNote = z.infer<typeof CoverageNoteSchema>;
 export type PageProbe = z.infer<typeof PageProbeSchema>;
 export type SiteChecks = z.infer<typeof SiteChecksSchema>;
 export type FinalReport = z.infer<typeof FinalReportSchema>;
+export type ZGProof = z.infer<typeof ZGProofSchema>;
 export type TaskHistoryEntry = z.infer<typeof TaskHistoryEntrySchema>;
 export type SeoCrawlSummary = z.infer<typeof SeoCrawlSummarySchema>;
 export type SeoPageStats = z.infer<typeof SeoPageStatsSchema>;

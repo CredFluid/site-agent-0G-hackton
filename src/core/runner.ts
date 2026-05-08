@@ -42,7 +42,7 @@ import {
   textHasPlayActionCue
 } from "./taskHeuristics.js";
 import { ensureDir, writeJson } from "../utils/files.js";
-import { debug, warn } from "../utils/log.js";
+import { debug, info, warn } from "../utils/log.js";
 import { installPlaywrightPageCompat } from "../utils/playwrightCompat.js";
 import { sleep } from "../utils/time.js";
 import { extractSellInstruction, taskLooksLikeTrade } from "../trade/extractor.js";
@@ -2734,6 +2734,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
         history,
         reason: inferred.reason
       });
+      info(`Completed ${task.name}: ${inferred.status.replace("_", " ")} after ${history.length} step${history.length === 1 ? "" : "s"}`);
 
       if (Date.now() >= sessionDeadline) {
         break;
@@ -2754,6 +2755,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
         taskResults,
         budgetMs: remainingSiteChecksBudgetMs
       });
+      info("Completed supplemental site checks");
     } else {
       rawEvents.push({
         type: "site_checks_skipped",
@@ -2773,6 +2775,11 @@ export async function runTaskSuite(options: RunOptions): Promise<{
             violations: [],
             error: `Accessibility audit failed: ${cleanErrorMessage(error)}`
           }));
+    info(
+      accessibility.error
+        ? `Completed accessibility audit with warning: ${accessibility.error}`
+        : `Completed accessibility audit with ${accessibility.violations.length} violation${accessibility.violations.length === 1 ? "" : "s"}`
+    );
   } catch (error) {
     const note = `Runner recovered from an unexpected error and will finalize the report with partial evidence: ${cleanErrorMessage(error)}`;
     rawEvents.push({
@@ -2820,6 +2827,7 @@ export async function runTaskSuite(options: RunOptions): Promise<{
     writeJson(path.join(options.runDir, "task-results.json"), taskResults);
     writeJson(path.join(options.runDir, "accessibility.json"), accessibility);
     writeJson(path.join(options.runDir, "site-checks.json"), siteChecks);
+    info("Saved browser execution artifacts");
 
     await context?.close().catch(() => undefined);
     await browser?.close().catch(() => undefined);

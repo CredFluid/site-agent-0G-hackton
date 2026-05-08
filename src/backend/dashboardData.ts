@@ -178,7 +178,6 @@ export async function buildStandaloneReportHtml(repository: RunRepository, runId
   const siteChecks = await repository.readJsonArtifact(runId, "site-checks.json", SiteChecksSchema);
   const taskRuns = (await repository.readJsonArtifact(runId, "task-results.json", TaskRunResultsSchema)) ?? [];
   const rawEvents = (await repository.readJsonArtifact(runId, "raw-events.json", RawEventsSchema)) ?? [];
-
   if (!report) {
     return repository.readTextArtifact(runId, "report.html");
   }

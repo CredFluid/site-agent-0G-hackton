@@ -200,6 +200,46 @@ function renderCoverageBlock(coverage: SectionCoverage): string {
   `;
 }
 
+function renderZGProofSection(report: FinalReport): string {
+  const proof = report.zgProof;
+  if (!proof) {
+    return "";
+  }
+
+  const storageRoot = proof.storageRootHash ?? "Recorded in storage pointer";
+  const storageTx = proof.storageUploadTxHash ?? "Storage upload transaction not returned by indexer";
+  const proofStatus = proof.status === "registered" ? "Registered on-chain" : "Submitted to chain";
+
+  return `
+      <section class="section">
+        <h2>0G Proof</h2>
+        <div class="card-grid">
+          <div class="summary-card">
+            <h3>On-chain registry</h3>
+            <p>${escapeHtml(proofStatus)}</p>
+            <p class="mono">${escapeHtml(proof.registryContractAddress)}</p>
+            <p style="margin-top: 0.65rem;"><a class="inline-link" href="${escapeHtml(proof.explorerUrl)}" target="_blank" rel="noreferrer">Open 0G Explorer transaction</a></p>
+          </div>
+          <div class="summary-card">
+            <h3>Evidence bundle</h3>
+            <p class="mono">${escapeHtml(proof.artifactHash)}</p>
+            <p style="margin-top: 0.65rem;">${escapeHtml(proof.storagePointer)}</p>
+          </div>
+        </div>
+        <div class="summary-card" style="margin-top: 0.9rem;">
+          <h3>Verification details</h3>
+          <ul class="bullet-list">
+            <li>Run ID: <span class="mono">${escapeHtml(proof.runId)}</span></li>
+            <li>Target URL hash: <span class="mono">${escapeHtml(proof.targetUrlHash)}</span></li>
+            <li>Task set hash: <span class="mono">${escapeHtml(proof.taskSetHash)}</span></li>
+            <li>0G storage root: <span class="mono">${escapeHtml(storageRoot)}</span></li>
+            <li>0G storage upload tx: <span class="mono">${escapeHtml(storageTx)}</span></li>
+          </ul>
+        </div>
+      </section>
+  `;
+}
+
 export function renderHtmlReport(args: HtmlReportArgs): string {
   const template = buildStructuredReviewTemplate({
     website: args.website,
@@ -324,6 +364,13 @@ export function renderHtmlReport(args: HtmlReportArgs): string {
         background: var(--surface2);
         font-family: var(--font-mono);
         font-size: 11px;
+      }
+
+      .topbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
       }
 
       .page {
@@ -647,6 +694,17 @@ export function renderHtmlReport(args: HtmlReportArgs): string {
       .mono {
         font-family: var(--font-mono);
         font-size: 0.86rem;
+        overflow-wrap: anywhere;
+      }
+
+      .inline-link {
+        color: var(--accent);
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .inline-link:hover {
+        text-decoration: underline;
       }
 
       @media (max-width: 980px) {
@@ -687,7 +745,9 @@ export function renderHtmlReport(args: HtmlReportArgs): string {
             <div class="brand-sub">Task execution output</div>
           </div>
         </div>
-        <div class="topbar-chip">${escapeHtml(args.runId ? `Run ${args.runId}` : "Generated task output")}</div>
+        <div class="topbar-actions">
+          <div class="topbar-chip">${escapeHtml(args.runId ? `Run ${args.runId}` : "Generated task output")}</div>
+        </div>
       </div>
     </header>
     <main class="page">
@@ -953,6 +1013,8 @@ export function renderHtmlReport(args: HtmlReportArgs): string {
           <ul class="bullet-list">${renderSimpleList(template.agentNotes.limitations)}</ul>
         </div>
       </section>
+
+      ${renderZGProofSection(args.report)}
 
       <section class="section">
         <h2>Appendix: Task Evidence</h2>

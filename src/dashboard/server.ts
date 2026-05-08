@@ -163,14 +163,14 @@ async function handleRequest(
         // Trigger a default audit run when payment is received
         // In a real production app, you'd match the 'metadata' or 'email' to a specific user/site
         await args.submissionService.createSubmission({
-          url: "https://www.hackquest.io/hackathons/0G-APAC-Hackathon", // Default target for this hackathon agent
+          url: "https://example.com", // Default target for this agent
           agentCount: 1,
           customTasks: [
-            "Perform a full site audit focusing on the hackathon tracks and submission requirements.",
-            "Verify all links in the overview and prize tabs are reachable.",
-            "Check for any mobile layout issues on the main landing page."
+            "Perform a full site audit focusing on navigation and user experience.",
+            "Verify all main navigation links are reachable.",
+            "Check for any layout issues on the homepage."
           ],
-          instructionText: "Automated audit triggered via Paystack payment."
+          instructionText: "Automated audit triggered via payment."
         });
       },
       onTransferSuccess: (data) => {
@@ -249,15 +249,7 @@ async function handleRequest(
     return;
   }
 
-  if (req.method !== "GET") {
-    sendText(res, 405, "Method not allowed", "text/plain");
-    return;
-  }
 
-  if (requestUrl.pathname === "/health") {
-    sendJson(res, { ok: true, service: "site-agent-dashboard" });
-    return;
-  }
 
   if (requestUrl.pathname === "/") {
     sendText(res, 200, renderLandingPage({ allowPrivateTargets: true }), "text/html");

@@ -32,8 +32,8 @@ import {
   type TaskSuite
 } from "../schemas/types.js";
 
-const PLANNER_TIMEOUT_MS = 30000;
-const PLANNER_MAX_RETRIES = 3;
+const PLANNER_TIMEOUT_MS = 20000;
+const PLANNER_MAX_RETRIES = 1;
 const ORDERED_STEP_PATTERNS = [/^step\s+\d+\b/i, /^\d+[\.\)]\s+/, /^(first|second|third|fourth|fifth|next|then|finally)\b/i];
 const ACTIONABLE_INSTRUCTION_PATTERNS = [
   /^(?:step\s+\d+[:.)-]?\s*)?(?:click|tap|press|select|choose|open)\b/i,
@@ -1868,8 +1868,12 @@ export type PlannerResolution = {
 };
 
 function usesSelfHostedPlannerRuntime(llm?: LlmRuntimeOptions): boolean {
-  const provider = llm?.provider ?? (process.env.LLM_PROVIDER?.trim().toLowerCase() === "ollama" ? "ollama" : "openai");
-  if (provider === "ollama") {
+  const rawProvider = llm?.provider ?? process.env.LLM_PROVIDER?.trim().toLowerCase();
+
+  // Ollama and 0G are non-OpenAI runtimes — retries waste the run budget
+  // because a timeout is almost always a connectivity or quota issue, not a
+  // transient model error that a retry would fix.
+  if (rawProvider === "ollama" || rawProvider === "0g") {
     return true;
   }
 

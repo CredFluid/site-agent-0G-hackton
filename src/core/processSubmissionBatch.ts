@@ -5,6 +5,7 @@ import { buildCustomTaskSuite } from "./customTaskSuite.js";
 import { runAuditJob } from "./runAuditJob.js";
 import { SUBMISSION_TASKS_REQUIRED_MESSAGE } from "../submissions/customTasks.js";
 import { SubmissionSchema, type Submission } from "../submissions/types.js";
+import { info } from "../utils/log.js";
 
 export async function processSubmissionBatch(args: {
   submission: Submission;
@@ -92,6 +93,7 @@ export async function processSubmissionBatch(args: {
       overallScore: null
     }));
   });
+  info(`Submission ${currentSubmission.id}: started ${variants.length} agent run${variants.length === 1 ? "" : "s"}`);
 
   const agentOutcomes = await Promise.all(
     variants.map(async (variant): Promise<CompletedAgentAudit | null> => {
@@ -110,6 +112,7 @@ export async function processSubmissionBatch(args: {
             : agentRun
         );
       });
+      info(`Submission ${currentSubmission.id}: ${variant.label} started`);
 
       try {
         const result = await runAuditJob({
@@ -140,6 +143,7 @@ export async function processSubmissionBatch(args: {
 
         const runId = path.basename(result.runDir);
         await args.uploadRunArtifacts(runId, result.runDir);
+        info(`Submission ${currentSubmission.id}: ${variant.label} artifacts ready in ${runId}`);
 
         const completedAt = new Date().toISOString();
         await commit((draft) => {
@@ -159,6 +163,7 @@ export async function processSubmissionBatch(args: {
               : agentRun
           );
         });
+        info(`Submission ${currentSubmission.id}: ${variant.label} completed`);
 
         return {
           agentRun: {
@@ -181,7 +186,8 @@ export async function processSubmissionBatch(args: {
           taskResults: result.execution.taskResults,
           accessibility: result.execution.accessibility,
           siteChecks: result.execution.siteChecks,
-          runId
+          runId,
+          runDir: result.runDir
         };
       } catch (error) {
         const completedAt = new Date().toISOString();
@@ -200,6 +206,7 @@ export async function processSubmissionBatch(args: {
               : agentRun
           );
         });
+        info(`Submission ${currentSubmission.id}: ${variant.label} failed: ${message}`);
 
         return null;
       }
@@ -219,7 +226,9 @@ export async function processSubmissionBatch(args: {
 
   const aggregateSubmissionSnapshot = structuredClone(currentSubmission);
   const aggregateRun = createAggregateRun(aggregateSubmissionSnapshot, completedOutcomes);
+  info(`Submission ${currentSubmission.id}: aggregate report created at ${aggregateRun.runId}`);
   await args.uploadRunArtifacts(aggregateRun.runId, aggregateRun.runDir);
+  info(`Submission ${currentSubmission.id}: aggregate artifacts ready`);
 
   await commit((draft) => {
     draft.status = "completed";
@@ -230,6 +239,7 @@ export async function processSubmissionBatch(args: {
     draft.reportSummary = aggregateRun.report.summary;
     draft.overallScore = aggregateRun.report.overall_score;
   });
+  info(`Submission ${currentSubmission.id}: completed`);
 
   return currentSubmission;
 }
