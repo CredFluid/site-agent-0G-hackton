@@ -26,7 +26,6 @@ import { findSubmissionByReportToken } from "../submissions/store.js";
 import { parseSubmissionTargetMode, validateSubmissionUrl } from "../submissions/publicUrl.js";
 import { SubmissionService } from "../submissions/service.js";
 import { DASHBOARD_CSS as SHARED_DASHBOARD_CSS, DASHBOARD_HEAD_TAGS } from "./theme.js";
-import { handleWebhook } from "../paystack/index.js";
 
 
 dotenv.config();
@@ -148,38 +147,6 @@ async function handleRequest(
   if (requestUrl.pathname === "/favicon.ico") {
     res.writeHead(204);
     res.end();
-    return;
-  }
-
-  if (req.method === "POST" && requestUrl.pathname === "/webhooks/paystack") {
-    await handleWebhook(req, res, {
-      onChargeSuccess: async (data) => {
-        const amountNaira = (Number(data["amount"] ?? 0)) / 100;
-        const customer = data["customer"] as Record<string, unknown> | undefined;
-        const email = customer?.["email"] as string | undefined;
-
-        info(`[paystack] Received ₦${amountNaira} from ${email ?? "unknown"} — triggering auto-audit`);
-
-        // Trigger a default audit run when payment is received
-        // In a real production app, you'd match the 'metadata' or 'email' to a specific user/site
-        await args.submissionService.createSubmission({
-          url: "https://example.com", // Default target for this agent
-          agentCount: 1,
-          customTasks: [
-            "Perform a full site audit focusing on navigation and user experience.",
-            "Verify all main navigation links are reachable.",
-            "Check for any layout issues on the homepage."
-          ],
-          instructionText: "Automated audit triggered via payment."
-        });
-      },
-      onTransferSuccess: (data) => {
-        info(`[paystack] Transfer successful: ${data["transfer_code"]}`);
-      },
-      onTransferFailed: (data) => {
-        warn(`[paystack] Transfer failed: ${data["transfer_code"]}`);
-      }
-    });
     return;
   }
 

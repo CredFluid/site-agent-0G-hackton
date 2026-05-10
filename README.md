@@ -68,8 +68,6 @@ User submits URL + tasks
 - **Auth-aware** — detects login walls mid-run, fills signup forms, polls IMAP for OTP/verification emails
 - **Supplemental audits** — SEO crawl, security headers, performance timings, accessibility (axe-core), CRO signals, content readability, mobile layout
 - **Activity replay** — compact animated WebP that overlays all recorded agent actions onto the captured click frames
-- **Exchange-flow QA** — safely tests Naira/crypto buy and sell flows with harmless values and stops before real transfers
-- **Paystack Integration** — provision dedicated virtual Naira accounts for agents and trigger outbound bank transfers
 - **0G Network Integration** — decentralized artifact persistence (0G Storage), on-chain audit proofs (0G Chain), and optional 0G Compute inference
 - **Triple LLM support** — OpenAI (GPT-5) for production, Ollama for local development, and 0G for decentralized GPU inference
 - **Two deployment modes** — CLI or web dashboard, including Render web service deployment
@@ -209,11 +207,6 @@ npm run dev -- --url http://127.0.0.1:3000 --task "Check the homepage CTA" \
 
 # Allow self-signed HTTPS certificates
 npm run dev -- --url https://localhost:3000 --task "Check the homepage" --ignore-https-errors
-
-# Exchange-flow QA without real transfers
-npm run dev -- --url https://example.com \
-  --task "Click Buy; enter 50000 NGN; confirm the crypto preview updates; copy the account number if available; stop before making any real payment" \
-  --task "Click Sell; enter 0.01 USDT; confirm the Naira payout preview updates; stop before sending any real crypto"
 
 # Deterministic onchain validation in dry-run mode
 npm run dev -- --url https://example-dapp.test \
@@ -437,30 +430,6 @@ If you specifically need to test how a dApp interacts with the MetaMask UI, you 
 
 ---
 
-## Paystack Integration
-
-The agent has built-in support for the Paystack API (Nigeria) to handle Naira payments and payouts. This enables "Agent-as-a-Service" monetization flows.
-
-### Features
-- **Dedicated Virtual Accounts (DVA):** Automatically provisions a unique bank account number (Wema/GTB) for each agent persona.
-- **Naira Transfers:** Initiates outbound transfers to any Nigerian bank account via the Transfers API.
-- **Webhook Processing:** Securely handles `charge.success` and `transfer.success` events with HMAC-SHA512 verification.
-- **Zero-Dependency Client:** Uses Node 20+ native `fetch` (no `axios` required).
-
-### Quick Setup
-Configure Paystack in `.env`:
-```bash
-PAYSTACK_SECRET_KEY=sk_test_...
-PAYSTACK_PUBLIC_KEY=pk_test_...
-PAYSTACK_DVA_PROVIDER=wema-bank
-```
-
-### Testing the Integration
-Run the standalone smoke test to verify your API keys and DVA provisioning:
-```bash
-npm run paystack:test
-```
-
 ---
 
 
@@ -556,9 +525,6 @@ Since the agent follows only your tasks, structure them as focused coverage lane
 # Probe edge cases
 --task "Enter an invalid email in the signup form and check the error message"
 
-# Safely test an exchange flow
---task "Click Buy; enter 50000 NGN; confirm the crypto preview updates; provide a harmless test wallet address; verify the payment account card appears; stop before making any real payment"
-
 # Ask for monitoring evidence
 --task "Check exchange-flow monitoring evidence for amount entry, wallet submission, bank submission, displayed account details, copy actions, and transfer attempts"
 ```
@@ -569,7 +535,6 @@ Since the agent follows only your tasks, structure them as focused coverage lane
 - Include literal values when needed, for example `enter 50000 NGN` or `type "test@example.com" into email`
 - Split large journeys into **separate tasks** so early clicks don't consume the entire budget
 - Paste multi-line instructions or upload text/JSON files in the dashboard when tasks come from a spec
-- A combined Naira/crypto exchange spec that mentions Buy flow, Sell flow, Naira, crypto, and logging/monitoring/events is expanded into separate Buy, Sell, and monitoring tasks
 - For slow sites, increase `NAVIGATION_TIMEOUT_MS` before increasing step counts
 - Use `--storage-state` for pages behind authentication
 - Run **multiple agent perspectives** (2-5) when you want broader coverage
@@ -631,7 +596,6 @@ High-level summary:
 | **Authentication** | `auth/profile.ts`, `auth/inbox.ts`, `auth/runner.ts` | Identity management, IMAP OTP polling, login flows |
 | **Evaluation** | `evaluator.ts`, `aggregateReport.ts` | LLM scoring, multi-agent result merging |
 | **Site checks** | `siteChecks.ts`, `audit.ts` | SEO, performance, security, accessibility |
-| **Paystack** | `paystack/*` | Dedicated virtual accounts, Naira transfers, webhooks |
 | **0G Network** | `zerog/*`, `llm/client.ts` | 0G Compute inference, decentralized storage, and on-chain proof registration |
 | **Reporting** | `reporting/html.ts`, `reporting/markdown.ts`, `clickReplay.ts` | HTML/MD/JSON reports, activity replay animation |
 | **Trade safety** | `trade/*`, `wallet/*` | Wallet injection, deterministic trade extraction, policy validation, dry-run/broadcast records |

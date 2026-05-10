@@ -18,10 +18,9 @@
 10. [Site Checks & Audits](#site-checks--audits)
 11. [Dashboard & Submissions](#dashboard--submissions)
 12. [0G Proof System](#0g-proof-system)
-13. [Paystack System](#paystack-system)
-14. [Deployment Modes](#deployment-modes)
-15. [Directory Structure](#directory-structure)
-16. [Data Flow Summary](#data-flow-summary)
+13. [Deployment Modes](#deployment-modes)
+14. [Directory Structure](#directory-structure)
+15. [Data Flow Summary](#data-flow-summary)
 
 ---
 
@@ -499,26 +498,6 @@ Aggregate runs summarize child runs. The child run contains the canonical on-cha
 
 ---
 
-## Paystack System
-
-Site Agent Pro integrates with the Paystack API to provide automated Naira financial operations for agents.
-
-### Core Components (`src/paystack/`)
-
-| Module | Purpose |
-|---|---|
-| `client.ts` | Zero-dependency REST client using Node native `fetch`. Handles authentication and error normalization. |
-| `account.ts` | Manages Dedicated Virtual Accounts (DVA). Provisions real bank accounts for agent personas and caches them locally. |
-| `transfer.ts` | Orchestrates outbound bank transfers. Supports recipient registration and dry-run safety gates. |
-| `webhook.ts` | Signature-verified HTTP listener for Paystack events (`charge.success`, `transfer.success`). |
-| `test-paystack.ts` | Integration smoke-test for validating API keys and DVA connectivity. |
-
-### DVA Lifecycle
-
-1. Agent starts and checks for cached DVA in `SITE_AGENT_DATA_DIR/paystack/dva.json`.
-2. If missing, it creates/retrieves a Paystack Customer and requests a `dedicated_account`.
-3. Account details (Bank Name, Account Number) are stored and exposed in the dashboard for user payments.
-
 ---
 
 ## Deployment Modes
@@ -563,9 +542,6 @@ src/
 │   ├── profile.ts          #   Agent identity management
 │   ├── inbox.ts            #   IMAP email polling for OTP
 │   └── runner.ts           #   Full signup/login/OTP flow
-│
-├── paystack/               # Paystack integration (Naira)
-│   └── ...
 │
 ├── zerog/                  # 0G Storage + 0G Chain proof integration
 │   ├── proof.ts            #   Evidence bundle upload and registry transaction

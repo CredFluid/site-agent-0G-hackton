@@ -48,32 +48,6 @@ function normalizeTaskCandidate(value: string): string {
   return normalizeTaskText(stripBulletPrefix(value.replace(/^[;,\s]+|[;,\s]+$/g, "")));
 }
 
-function looksLikeNairaCryptoExchangeSpec(value: string): boolean {
-  return (
-    /\bbuy\s+flow\b/i.test(value) &&
-    /\bsell\s+flow\b/i.test(value) &&
-    /\bnaira\b/i.test(value) &&
-    /\bcrypto\b/i.test(value) &&
-    /\blogging|monitoring|events?\b/i.test(value)
-  );
-}
-
-function buildNairaCryptoExchangeTasks(): string[] {
-  return [
-    [
-      "Click Buy;",
-      "enter a harmless Naira amount; confirm the crypto preview updates; select a token; select a network; provide a harmless test wallet address; click Next; verify a Naira payment account card is shown; copy the account number if a copy control is available; stop before making any real payment."
-    ].join(" "),
-    [
-      "Click Sell;",
-      "enter a harmless crypto amount; confirm the Naira payout preview updates; click Next; provide a harmless test bank account number when requested; verify the business crypto wallet address is shown; copy the crypto address if a copy control is available; stop before sending any real crypto."
-    ].join(" "),
-    [
-      "Check exchange-flow monitoring evidence:",
-      "while testing Buy and Sell, look for visible console logs, analytics/debug messages, or emitted events for amount entry, wallet address submission, bank account submission, account or wallet details displayed, clipboard actions, transfer trigger attempts, crypto payout initiation, and Naira payout initiation. Report which monitoring events were observed or missing."
-    ].join(" ")
-  ];
-}
 
 function isFileLike(value: FormDataEntryValue | null): value is File {
   return Boolean(value) && typeof value !== "string" && typeof (value as File).text === "function";
@@ -131,10 +105,6 @@ function splitInstructionText(raw: string): string[] {
   const normalized = normalizeInstructionSourceText(raw);
   if (!normalized) {
     return [];
-  }
-
-  if (looksLikeNairaCryptoExchangeSpec(normalized)) {
-    return buildNairaCryptoExchangeTasks();
   }
 
   const jsonTasks = parseJsonInstructionSource(normalized);
