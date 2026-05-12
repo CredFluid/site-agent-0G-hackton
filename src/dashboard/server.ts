@@ -80,7 +80,7 @@ function renderDashboardHtml(): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Site Agent Dashboard</title>
+    <title>AgentProbe Dashboard</title>
     ${DASHBOARD_HEAD_TAGS}
     <style>${SHARED_DASHBOARD_CSS}</style>
   </head>

@@ -21,7 +21,7 @@ export function writeText(filePath: string, content: string): void {
 }
 
 function resolveDataRoot(): string {
-  const configuredRoot = process.env.SITE_AGENT_DATA_DIR?.trim();
+  const configuredRoot = process.env.AGENTPROBE_DATA_DIR?.trim();
   if (configuredRoot) {
     ensureDir(configuredRoot);
     return configuredRoot;

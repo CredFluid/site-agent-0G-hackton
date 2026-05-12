@@ -26,7 +26,7 @@ export function buildWeb3InjectionScript(args: {
   return `(function() {
   "use strict";
 
-  if (window.ethereum && window.ethereum.__siteAgentInjected) {
+  if (window.ethereum && window.ethereum.__agentProbeInjected) {
     return;
   }
 
@@ -54,7 +54,7 @@ export function buildWeb3InjectionScript(args: {
   function emit(event) {
     var args = Array.prototype.slice.call(arguments, 1);
     (listeners[event] || []).forEach(function(fn) {
-      try { fn.apply(null, args); } catch(e) { console.warn("[site-agent-wallet] listener error:", e); }
+      try { fn.apply(null, args); } catch(e) { console.warn("[agentprobe-wallet] listener error:", e); }
     });
   }
 
@@ -88,7 +88,7 @@ export function buildWeb3InjectionScript(args: {
   }
 
   function maybeCaptureUpstreamEthereum(candidate) {
-    if (!candidate || candidate === provider || candidate.__siteAgentInjected) {
+    if (!candidate || candidate === provider || candidate.__agentProbeInjected) {
       return;
     }
 
@@ -102,7 +102,7 @@ export function buildWeb3InjectionScript(args: {
   }
 
   function getUpstreamEthereum() {
-    if (!upstreamEthereum && window.ethereum && window.ethereum !== provider && !window.ethereum.__siteAgentInjected) {
+    if (!upstreamEthereum && window.ethereum && window.ethereum !== provider && !window.ethereum.__agentProbeInjected) {
       maybeCaptureUpstreamEthereum(window.ethereum);
     }
 
@@ -244,7 +244,7 @@ export function buildWeb3InjectionScript(args: {
   /* ----- Provider object ----- */
   var provider = {
     isMetaMask: true,
-    __siteAgentInjected: true,
+    __agentProbeInjected: true,
     get chainId() {
       var originalEthereum = getUpstreamEthereum();
       return originalEthereum && originalEthereum.chainId ? originalEthereum.chainId : CHAIN_ID_HEX;
@@ -308,10 +308,10 @@ export function buildWeb3InjectionScript(args: {
     window.dispatchEvent(new CustomEvent("eip6963:announceProvider", {
       detail: Object.freeze({
         info: {
-          uuid: "site-agent-wallet-00000000",
-          name: "Site Agent Wallet",
+          uuid: "agentprobe-wallet-00000000",
+          name: "AgentProbe Wallet",
           icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>",
-          rdns: "com.siteagent.wallet"
+          rdns: "com.agentprobe.wallet"
         },
         provider: provider
       })
@@ -321,10 +321,10 @@ export function buildWeb3InjectionScript(args: {
       window.dispatchEvent(new CustomEvent("eip6963:announceProvider", {
         detail: Object.freeze({
           info: {
-            uuid: "site-agent-wallet-00000000",
-            name: "Site Agent Wallet",
+            uuid: "agentprobe-wallet-00000000",
+            name: "AgentProbe Wallet",
             icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>",
-            rdns: "com.siteagent.wallet"
+            rdns: "com.agentprobe.wallet"
           },
           provider: provider
         })
@@ -346,6 +346,6 @@ export function buildWeb3InjectionScript(args: {
     emit("accountsChanged", [AGENT_ADDRESS]);
   }, 0);
 
-  console.log("[site-agent-wallet] Injected Web3 provider — address:", AGENT_ADDRESS, "chain:", CHAIN_ID_DEC);
+  console.log("[agentprobe-wallet] Injected Web3 provider — address:", AGENT_ADDRESS, "chain:", CHAIN_ID_DEC);
 })();`;
 }

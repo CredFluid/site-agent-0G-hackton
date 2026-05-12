@@ -137,7 +137,7 @@ program
         options.tradeConfirmations !== undefined ? options.tradeConfirmations : defaultTradeOptions.confirmations
     };
 
-    info(`Running site agent against ${baseUrl}`);
+    info(`Running AgentProbe against ${baseUrl}`);
     info(`Total run budget is capped at ${Math.round(config.maxSessionDurationMs / 1000)} seconds`);
     info(
       llmRuntime.provider === "ollama"

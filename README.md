@@ -1,10 +1,10 @@
-# Site Agent Pro
+# AgentProbe
 
-> AI-powered browser agent that executes real user tasks on any website, captures step-by-step evidence, and produces scored, actionable reports.
+> AI-powered browser agent that verifies website user flows, records evidence, and anchors audit proofs on 0G Storage and Chain.
 
 **Playwright** · **OpenAI / Ollama / 0G Compute** · **axe-core** · **TypeScript** · **0G Storage & Chain** · **Zod**
 
-Site Agent Pro is an AI browser agent that verifies website user flows, records evidence, and anchors audit proofs on 0G Storage and Chain.
+AgentProbe is an AI browser agent that verifies website user flows, records evidence, and anchors audit proofs on 0G Storage and Chain.
 
 ---
 

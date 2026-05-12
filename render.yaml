@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: site-agent-prod
+    name: agentprobe
     runtime: node
     plan: starter
     autoDeployTrigger: commit

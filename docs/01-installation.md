@@ -17,8 +17,8 @@ npm -v
 ## 2. Unzip the project
 
 ```bash
-unzip site-agent-prod.zip
-cd site-agent-prod
+unzip agentprobe.zip
+cd agentprobe
 ```
 
 ## 3. Install dependencies

@@ -1,4 +1,4 @@
-# Site Agent Pro — Architecture Guide
+# AgentProbe — Architecture Guide
 
 > An AI-powered browser automation agent that executes user-defined tasks on websites, captures evidence of every interaction, generates scored reports, and anchors audit proofs on 0G.
 
@@ -26,7 +26,7 @@
 
 ## System Overview
 
-Site Agent Pro is a **browser automation and audit-proof system** that:
+AgentProbe is a **browser automation and audit-proof system** that:
 
 1. Accepts a **website URL** and a list of **user-defined tasks** (e.g., "Click the Sign Up Free tab and fill up every visible detail and submit")
 2. Launches a **Playwright-controlled Chromium browser**
@@ -478,7 +478,7 @@ queued → running → completed
 
 ## 0G Proof System
 
-Site Agent Pro uses 0G in three places:
+AgentProbe uses 0G in three places:
 
 | Component | Project Use |
 |---|---|
